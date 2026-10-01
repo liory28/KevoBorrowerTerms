@@ -4,53 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<title>Loan Terms Confirmation · Demo</title>
+<title>Loan Terms Portal</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Sans+Hebrew:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-<div class="demobar" role="region" aria-label="Demo controls">
-  <span class="tag">Demo · sample loan</span>
-  <label class="sr-only" for="screen">Screen</label>
-  <select id="screen">
-    <option value="request">1 · Before submission</option>
-    <option value="approved">2a · Approved as requested</option>
-    <option value="restructure">2b · Restructure needed</option>
-    <option value="locked">3 · Rate locked</option>
-    <option value="team">Team view</option>
-  </select>
-  <label class="tog" id="tog-fn"><input type="checkbox" id="fn"> Foreign National</label>
-  <label class="tog" id="tog-moved" hidden><input type="checkbox" id="moved"> Market moved</label>
-  <button class="dbtn fb" id="open-fb" type="button">Give feedback</button>
-</div>
-
-<main id="app" class="phone" aria-live="polite"></main>
-
-<!-- Feedback (Netlify Forms) -->
-<div class="modal" id="fb" hidden>
-  <form class="sheet" name="feedback" method="POST" data-netlify="true" netlify-honeypot="bot-field" id="fb-form">
-    <h2>Your feedback</h2>
-    <input type="hidden" name="form-name" value="feedback">
-    <input type="hidden" name="screen" id="fb-screen">
-    <p class="sr-only"><label>Leave empty <input name="bot-field"></label></p>
-    <label>Your name <input name="name" autocomplete="name"></label>
-    <label>How clear was it?
-      <select name="clarity">
-        <option value="">Choose one</option>
-        <option>Very clear</option><option>Mostly clear</option><option>Confusing in places</option><option>Hard to follow</option>
-      </select>
-    </label>
-    <label>What would you change? <textarea name="message" rows="4" required></textarea></label>
-    <div class="row2">
-      <button type="button" class="btn secondary" id="close-fb">Cancel</button>
-      <button type="submit" class="btn primary">Send</button>
-    </div>
-    <div id="fb-msg" class="small" role="status"></div>
-  </form>
-</div>
-
-<script src="/app.js"></script>
+<div id="app" class="portal" aria-live="polite"></div>
+<script type="module" src="/js/team.mjs"></script>
 </body>
 </html>

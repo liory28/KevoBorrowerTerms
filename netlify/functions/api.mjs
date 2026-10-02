@@ -522,7 +522,7 @@ export default async (req, context) => {
       if (!text) return err('Nothing to polish yet.');
       if (!aiConfigured() && !process.env.MOCK_AI) return err('Add an AI key (OPENAI_API_KEY or ANTHROPIC_API_KEY) in Netlify to use this.', 503);
       try { return json(await polishText({ text, mode: polishModes.includes(b.mode) ? b.mode : 'polish', audience: ['borrower', 'party', 'internal'].includes(b.audience) ? b.audience : 'borrower' })); }
-      catch (e) { console.error('[polish]', e); return err('The AI could not rewrite this right now. Please try again.', 502); }
+      catch (e) { console.error('[polish]', e); return err(`The AI could not rewrite this. ${e.message === 'not_configured' ? 'No AI key is set.' : e.message}`, 502); }
     }
     // Document formats (Settings) and background AI jobs
     if (path === 'formats' && m === 'GET') return json({ formats: await getAllFormats(), canEdit: canApprove(s), aiEnabled: aiConfigured() || Boolean(process.env.MOCK_AI) });

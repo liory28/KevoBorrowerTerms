@@ -42,27 +42,75 @@ BORROWER DATA:
 ${JSON.stringify(facts)}`;
 }
 
+// ---------- Low-level calls with plain-English errors ----------
+// Reasoning models (gpt-5*, o*) think before answering, which is slow; keep that short so
+// quick jobs (polish, Q&A) finish well inside Netlify's time limit.
+const isReasoningModel = (m) => /^(gpt-5|o\d)/i.test(m);
+
+export function friendlyAIError(provider, status, raw) {
+  const msg = String(raw || '');
+  const name = provider === 'claude' ? 'Anthropic (Claude)' : 'OpenAI';
+  const site = provider === 'claude' ? 'console.anthropic.com' : 'platform.openai.com';
+  if (status === 401 || /invalid.*(api|x-api)?.?key|incorrect api key/i.test(msg)) return `${name} rejected the API key. Re-copy the key from ${site} into Netlify (no spaces), then redeploy.`;
+  if (/quota|billing|credit balance|insufficient/i.test(msg)) return `${name} account has no credit. Add a payment method or credit at ${site} (Billing), then try again.`;
+  if (status === 404 || /model.*(not exist|not found|does not have access)|do not have access to the model/i.test(msg)) return `${name} says this account can't use the model. ${msg}`.slice(0, 300);
+  if (status === 403 && /verif/i.test(msg)) return `${name} needs your organization verified to use this model (${site} → Settings → Organization). ${msg}`.slice(0, 300);
+  if (status === 429) return `${name} is rate-limiting this account. Wait a minute and try again.`;
+  if (status >= 500) return `${name} is having trouble right now (${status}). Try again in a minute.`;
+  return `${name} error${status ? ` ${status}` : ''}: ${msg || 'no details'}`.slice(0, 300);
+}
+
+async function post(provider, url, headers, body, timeoutMs) {
+  let r, d;
+  try {
+    r = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
+  } catch (e) {
+    if (e.name === 'TimeoutError' || e.name === 'AbortError') throw new Error(`The AI took too long to answer. Try again${provider === 'chatgpt' ? ', or set OPENAI_MODEL to a faster model' : ''}.`);
+    throw new Error(`Could not reach the AI service: ${e.message}`);
+  }
+  try { d = await r.json(); } catch { d = {}; }
+  if (!r.ok) {
+    const e = new Error(friendlyAIError(provider, r.status, d?.error?.message || d?.message));
+    e.status = r.status;
+    throw e;
+  }
+  return d;
+}
+
+function openaiText(d) {
+  let text = typeof d.output_text === 'string' ? d.output_text : '';
+  if (!text) for (const it of d.output || []) for (const c of it.content || []) if (c.type === 'output_text') text += c.text;
+  return text;
+}
+
+async function callClaude({ system, messages, maxTokens, timeoutMs }) {
+  const d = await post('claude', 'https://api.anthropic.com/v1/messages',
+    { 'x-api-key': process.env.ANTHROPIC_API_KEY.trim(), 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+    { model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-5-5', max_tokens: maxTokens, system, messages }, timeoutMs);
+  return (d.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+}
+
+async function callOpenAI({ system, messages, maxTokens, json, effort, timeoutMs }) {
+  const model = process.env.OPENAI_MODEL || 'gpt-5-mini';
+  const body = { model, instructions: system, input: messages, store: false, max_output_tokens: maxTokens };
+  if (isReasoningModel(model)) body.reasoning = { effort };
+  if (json) body.text = { format: { type: 'json_object' } };
+  const d = await post('chatgpt', 'https://api.openai.com/v1/responses',
+    { authorization: `Bearer ${process.env.OPENAI_API_KEY.trim()}`, 'content-type': 'application/json' }, body, timeoutMs);
+  const text = openaiText(d);
+  if (!text && d.status === 'incomplete') throw new Error('The AI ran out of room before answering. Try a shorter text.');
+  return text;
+}
+
+// Quick calls run inside the normal web request (Netlify allows ~25s), so they get a 22s budget.
 export async function askAI(system, messages, maxTokens = 500) {
   if (process.env.ANTHROPIC_API_KEY) {
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-      body: JSON.stringify({ model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-5-5', max_tokens: maxTokens, system, messages })
-    });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d?.error?.message || `Claude error ${r.status}`);
-    return { answer: (d.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim(), provider: 'claude' };
+    const text = await callClaude({ system, messages, maxTokens, timeoutMs: 22000 });
+    return { answer: text.trim(), provider: 'claude' };
   }
   if (process.env.OPENAI_API_KEY) {
-    const r = await fetch('https://api.openai.com/v1/responses', {
-      method: 'POST',
-      headers: { authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ model: process.env.OPENAI_MODEL || 'gpt-5-mini', instructions: system, input: messages, store: false })
-    });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d?.error?.message || `OpenAI error ${r.status}`);
-    let text = typeof d.output_text === 'string' ? d.output_text : '';
-    if (!text) for (const it of d.output || []) for (const c of it.content || []) if (c.type === 'output_text') text = c.text;
+    // Reasoning tokens count toward max_output_tokens, so leave headroom.
+    const text = await callOpenAI({ system, messages, maxTokens: maxTokens + 2000, effort: 'minimal', timeoutMs: 22000 });
     return { answer: text.trim(), provider: 'chatgpt' };
   }
   throw new Error('not_configured');
@@ -77,28 +125,10 @@ export function extractJson(text) {
 }
 
 export async function callAIJson(system, user, maxTokens = 12000) {
-  if (process.env.ANTHROPIC_API_KEY) {
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-      body: JSON.stringify({ model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-5-5', max_tokens: maxTokens, system, messages: [{ role: 'user', content: user }] })
-    });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d?.error?.message || `Claude error ${r.status}`);
-    return { data: extractJson((d.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('')), provider: 'claude' };
-  }
-  if (process.env.OPENAI_API_KEY) {
-    const r = await fetch('https://api.openai.com/v1/responses', {
-      method: 'POST',
-      headers: { authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ model: process.env.OPENAI_MODEL || 'gpt-5-mini', instructions: system, input: [{ role: 'user', content: user }], text: { format: { type: 'json_object' } }, store: false, max_output_tokens: maxTokens })
-    });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d?.error?.message || `OpenAI error ${r.status}`);
-    let text = typeof d.output_text === 'string' ? d.output_text : '';
-    if (!text) for (const it of d.output || []) for (const c of it.content || []) if (c.type === 'output_text') text += c.text;
-    return { data: extractJson(text), provider: 'chatgpt' };
-  }
+  // Used from background functions (15-minute limit), so a long budget is fine.
+  const messages = [{ role: 'user', content: user }];
+  if (process.env.ANTHROPIC_API_KEY) return { data: extractJson(await callClaude({ system, messages, maxTokens, timeoutMs: 600000 })), provider: 'claude' };
+  if (process.env.OPENAI_API_KEY) return { data: extractJson(await callOpenAI({ system, messages, maxTokens: maxTokens + 8000, json: true, effort: 'low', timeoutMs: 600000 })), provider: 'chatgpt' };
   throw new Error('No AI key is set (OPENAI_API_KEY or ANTHROPIC_API_KEY).');
 }
 

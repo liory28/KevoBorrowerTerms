@@ -1,0 +1,10 @@
+import fs from 'node:fs';
+const B='http://localhost:8890';
+const j=async(m,p,b,c='')=>{const r=await fetch(B+p,{method:m,headers:{'content-type':'application/json',cookie:c},body:b?JSON.stringify(b):undefined});return {s:r.status,d:await r.json().catch(()=>({})),sc:r.headers.get('set-cookie')}};
+const lo=(await j('POST','/api/login',{role:'approver',name:'Lior',password:'lo'})).sc.split(';')[0];
+const {d:{id}}=await j('POST','/api/loans',{worksheet:JSON.parse(fs.readFileSync('test/refi_nores.json')),inputs:{borrowerEmail:'y@g.com',estimatedValue:765000,ioYears:10}},lo);
+const t=(await j('POST',`/api/loans/${id}/send`,null,lo)).d.url.split('/r/')[1];
+const rs=await Promise.all(Array.from({length:6},()=>j('POST','/api/b/respond',{t,action:'confirm',choices:{ppp:'buydown'}})));
+console.log('statuses', rs.map(r=>r.s).join(','));
+const L=(await j('GET',`/api/loans/${id}`,null,lo)).d.loan;
+console.log('confirm events:', L.events.filter(e=>e.type==='confirmed').length, '| copy emails attempted:', L.notifications.filter(n=>n.type==='borrower_copy').length, '| cash to close', L.response.numbers.funds.amount);

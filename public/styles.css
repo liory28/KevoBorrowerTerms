@@ -216,3 +216,4 @@ h1{margin:0;font-size:27px;line-height:1.2;font-weight:700}
 .bad{color:var(--alert)}
 @media (max-width:900px){.grid2{grid-template-columns:minmax(0,1fr)!important}.stages{grid-template-columns:repeat(3,minmax(0,1fr))!important}}
 .field.check{justify-content:flex-start;align-self:start}.field.check input{flex:none;min-height:0}
+.big .row span:last-child,.term .v,.cost .top2 .v{white-space:nowrap}

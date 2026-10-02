@@ -48,7 +48,9 @@ export function buildTerms(ws, inputs) {
   const originationItem = orig.items.find((x) => /origination/i.test(x.name));
 
   const gross = r2(ws.gross);
-  const lenderCredit = r2(ws.lenderCredit);
+  // A lender credit can appear in the closing-cost totals or under "l. Other credits". Use whichever is shown.
+  const lcCosts = r2(ws.lenderCredit), lcCredits = r2(ws.tx?.lenderCredit);
+  const lenderCredit = lcCosts > 0 ? lcCosts : lcCredits;
   const lenderFees = r2(orig.total);
   const reserves = r2(escrow.total);
   const thirdParty = r2(gross - lenderFees - reserves);
@@ -140,6 +142,7 @@ function buildChecks(ws, i, t) {
   const efh = r2((tx.prepaidItems || 0) + (tx.closingCosts || 0) + (tx.discount || 0) + (tx.mipFee || 0));
   const itemizedDue = r2(t.grossClosingCosts - t.paidBeforeClosing);
   if (Math.abs(efh - itemizedDue) > 1) add('warn', `Worksheet lines e + f + g + h total $${fmt(efh)}, but the itemized fees (less $${fmt(t.paidBeforeClosing)} paid before closing) total $${fmt(itemizedDue)}. The borrower page uses the itemized fees.`);
+  if (r2(ws.lenderCredit) > 0 && r2(tx.lenderCredit) > 0 && Math.abs(r2(ws.lenderCredit) - r2(tx.lenderCredit)) > 0.01) add('warn', `Two different lender credits on the worksheet: $${fmt(ws.lenderCredit)} in the closing costs and $${fmt(tx.lenderCredit)} under other credits. The page uses $${fmt(ws.lenderCredit)}. Confirm which is right.`);
   for (const c of tx.otherCredits || []) add('warn', `Not counted as a credit: "${c.name}" $${fmt(c.amount)}. Only the deposit, seller credit and lender credit reduce cash to close. If this is a real credit, update the worksheet.`);
   const base = scenario(t, {});
   if (ws.worksheetFunds) {

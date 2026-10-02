@@ -66,15 +66,21 @@ export function parseWorksheet(pages) {
     return found;
   };
 
+  // Header fields. Some worksheets put two fields on one line ("Borrower(s): X   Loan Number: Y"),
+  // others stack every field on its own line, so each field is read independently.
   const header = {};
+  const field = (re) => { const x = lastMatch(re); return x ? x[1].trim() : null; };
+  header.borrower = field(/Borrower\(s\):\s+(.*?)(?:\s{3,}Loan Number:.*)?$/);
+  header.loanNumber = field(/Loan Number:\s+(\S+)/);
+  header.property = field(/Property Address:\s*(.*?)(?:\s{3,}Loan Program:.*)?$/);
+  header.program = field(/Loan Program:\s+(.*?)(?:\s{3,}.*)?$/);
+  { const x = lastMatch(/Total Loan Amount:\s*(\$[\d,.]+)/); if (x) header.loanAmount = num(x[1]); }
+  header.term = field(/Loan Term:\s+(.*?)(?:\s{3,}.*)?$/);
+  { const x = lastMatch(/Interest Rate:\s+([\d.]+)%/); if (x) header.rate = Number(x[1]); }
+  { const x = lastMatch(/APR:\s+([\d.]+)%/); if (x) header.apr = Number(x[1]); }
+  header.datePrepared = field(/Date Prepared:\s+([\d/]+)/);
+  header.preparedBy = field(/Prepared by:\s+(.*?)(?:\s{3,}.*)?$/);
   let m;
-  if ((m = text.match(/Borrower\(s\):\s+(.*?)\s{3,}Loan Number:\s+(\S+)/))) { header.borrower = m[1].trim(); header.loanNumber = m[2].trim(); }
-  if ((m = text.match(/Property Address:\s*(.*?)\s{3,}Loan Program:\s+(.*)/))) { header.property = m[1].trim(); header.program = m[2].trim(); }
-  if ((m = text.match(/Total Loan Amount:\s*(\$[\d,.]+)/))) header.loanAmount = num(m[1]);
-  if ((m = text.match(/Loan Term:\s+(.*)/))) header.term = m[1].trim();
-  if ((m = text.match(/Interest Rate:\s+([\d.]+)%/))) header.rate = Number(m[1]);
-  if ((m = text.match(/APR:\s+([\d.]+)%/))) header.apr = Number(m[1]);
-  if ((m = text.match(/Date Prepared:\s+([\d/]+)/))) header.datePrepared = m[1];
 
   // Fee sections (first page only, which holds the itemization).
   const sections = [];
@@ -125,7 +131,9 @@ export function parseWorksheet(pages) {
   }
   tx.deposit = credits.get('Cash Deposit on sales contract') ?? 0;
   tx.sellerCredit = credits.get('Seller Credit') ?? 0;
-  tx.otherCredits = [...credits.entries()].filter(([k]) => !['Cash Deposit on sales contract', 'Seller Credit'].includes(k)).map(([name, amount]) => ({ name, amount }));
+  tx.lenderCredit = credits.get('Lender Credit') ?? 0;
+  const known = ['Cash Deposit on sales contract', 'Seller Credit', 'Lender Credit'];
+  tx.otherCredits = [...credits.entries()].filter(([k]) => !known.includes(k)).map(([name, amount]) => ({ name, amount }));
 
   const monthly = {
     pi: money(/Principal & Interest\s+(\$[\d,.]+)$/),
@@ -143,7 +151,7 @@ export function parseWorksheet(pages) {
 
   let lo = null;
   for (const l of all) {
-    const x = l.match(/^([A-Z][A-Za-z.' -]+?) \(License #: [^)]*NMLS #: (\d+)\)$/);
+    const x = l.match(/^([A-Z][A-Za-z.' -]+?) \((?:License #: [^)]*?, )?NMLS #: (\d+)\)$/);
     if (x && !/Corporation|Mortgage|LLC|Inc/.test(x[1])) lo = { name: x[1].trim(), nmls: x[2] };
   }
 

@@ -88,7 +88,7 @@ const C = {
     rsDisc: "We won't lock your rate until we've talked. Market pricing can move in the meantime, so the sooner we speak, the better.",
     lkEyebrow: 'Step 3 of 3 · Rate locked', lkH1: "Your rate is locked. Here's what we need to close.", lockedRate: 'Locked rate', lockedUntil: (d) => `Locked until ${d}`,
     stages: ['Requested', 'Approved', 'Locked', 'Your items', 'Closing'],
-    need: 'What we need from you', items: (n) => `${n} item${n === 1 ? '' : 's'}`, noItems: "Nothing needed right now. We'll let you know if underwriting asks for anything.",
+    need: 'What we need from you', items: (n) => `${n} item${n === 1 ? '' : 's'}`, progress: (d, n) => `${d} of ${n} received`, whyLbl: 'Why', received: 'Received', timing: { prior_to_docs: 'Needed now', prior_to_funding: 'Before closing', at_closing: 'At closing', post_closing: 'After closing', other: '' }, noItems: "Nothing needed right now. We'll let you know if underwriting asks for anything.",
     lkDisc: "Once these items are received and accepted by underwriting, we're cleared to close. Please send them before your lock expires.",
     sendDocs: 'To send documents, reply to the email with this link or contact your loan team.',
     upH1: "We're updating your terms", upLead: "Your loan team is preparing an updated version. You'll get a new link by email soon, and this page will stop working when it arrives.",
@@ -171,7 +171,7 @@ const C = {
     rsDisc: 'לא ננעל את הריבית לפני שנדבר. מחירי השוק יכולים לזוז בינתיים, אז כדאי לדבר כמה שיותר מהר.',
     lkEyebrow: 'שלב 3 מתוך 3 · הריבית ננעלה', lkH1: 'הריבית ננעלה. הנה מה שאנחנו צריכים לסגירה.', lockedRate: 'ריבית נעולה', lockedUntil: (d) => `נעולה עד ${d}`,
     stages: ['בקשה', 'אישור', 'נעילה', 'המסמכים שלך', 'סגירה'],
-    need: 'מה אנחנו צריכים ממך', items: (n) => `${n} פריטים`, noItems: 'אין צורך בכלום כרגע. נעדכן אם החיתום יבקש משהו.',
+    need: 'מה אנחנו צריכים ממך', items: (n) => `${n} פריטים`, progress: (d, n) => `התקבלו ${d} מתוך ${n}`, whyLbl: 'למה', received: 'התקבל', timing: { prior_to_docs: 'נדרש עכשיו', prior_to_funding: 'לפני הסגירה', at_closing: 'בסגירה', post_closing: 'אחרי הסגירה', other: '' }, noItems: 'אין צורך בכלום כרגע. נעדכן אם החיתום יבקש משהו.',
     lkDisc: 'ברגע שהפריטים האלה יתקבלו ויאושרו בחיתום, אפשר לסגור. נא לשלוח אותם לפני שהנעילה פגה.',
     sendDocs: 'כדי לשלוח מסמכים, השב למייל עם הקישור הזה או פנה לצוות ההלוואה.',
     upH1: 'אנחנו מעדכנים את התנאים שלך', upLead: 'צוות ההלוואה מכין גרסה מעודכנת. בקרוב תקבל קישור חדש במייל, והעמוד הזה יפסיק לעבוד כשהוא יגיע.',
@@ -344,14 +344,18 @@ function screenRestructure() {
 
 function screenLocked() {
   const v = S.view, tm = v.terms, lk = v.lock || {}, t = T();
-  const st = t.stages.map((l, i) => [l, i < 3 ? 'b-done' : i === 3 && lk.conditions.length ? 'b-now' : '']);
+  const he = S.lang === 'he';
+  const items = (lk.items && lk.items.length ? lk.items : (lk.conditions || []).map((c) => ({ text: c, why: '', done: false }))).map((x) => ({ ...x, text: he && x.textHe ? x.textHe : x.text, why: he && x.whyHe ? x.whyHe : x.why }));
+  const open = items.filter((x) => !x.done), done = items.filter((x) => x.done);
+  const st = t.stages.map((l, i) => [l, i < 3 ? 'b-done' : i === 3 && open.length ? 'b-now' : i === 3 ? 'b-done' : '']);
+  const itemHtml = (x) => `<div class="item ${x.done ? 'item-done' : ''}"><span class="box">${x.done ? ICON_OK(14) : ''}</span><span><div class="it" style="font-weight:500" dir="auto">${esc(x.text)}</div>${x.why ? `<div class="id" dir="auto"><strong>${esc(t.whyLbl)}:</strong> ${esc(x.why)}</div>` : ''}${!x.done && t.timing[x.timing] ? `<div class="id">${esc(t.timing[x.timing])}</div>` : ''}${x.done ? `<div class="id">${esc(t.received)}</div>` : ''}</span></div>`;
   return `${header()}
     <div class="hero"><div class="eyebrow">${esc(t.lkEyebrow)}</div><h1>${esc(t.lkH1)}</h1>${addr(tm)}</div>
     <div class="m big"><div class="lbl">${esc(t.lockedRate)}</div><div class="num">${pct(lk.rate)}</div><div class="note">${esc(t.lockedUntil(fmtDate(lk.expires)))}</div>
       <div class="foot"><span>${esc(t.payment)}</span><strong>${$$(lk.payment, 0)}</strong></div></div>
     <div class="m bars">${st.map(([l, c]) => `<div><div class="bar ${c}"></div>${esc(l)}</div>`).join('')}</div>
-    <div class="m card" style="padding-bottom:14px"><div style="display:flex;justify-content:space-between;align-items:baseline;padding:12px 0 4px;gap:12px"><div style="font-size:16px;font-weight:700">${esc(t.need)}</div><div class="small" style="padding:0">${lk.conditions.length ? esc(t.items(lk.conditions.length)) : ''}</div></div>
-      ${lk.conditions.length ? lk.conditions.map((c) => `<div class="item"><span class="box"></span><span class="it" style="font-weight:500" dir="auto">${esc(c)}</span></div>`).join('') : `<div class="small">${esc(t.noItems)}</div>`}
+    <div class="m card" style="padding-bottom:14px"><div style="display:flex;justify-content:space-between;align-items:baseline;padding:12px 0 4px;gap:12px"><div style="font-size:16px;font-weight:700">${esc(t.need)}</div><div class="small" style="padding:0">${items.length ? esc(t.progress(done.length, items.length)) : ''}</div></div>
+      ${items.length ? open.map(itemHtml).join('') + done.map(itemHtml).join('') : `<div class="small">${esc(t.noItems)}</div>`}
       <div class="small" style="padding:8px 0 0">${esc(t.sendDocs)}</div></div>
     <div class="disc">${esc(t.lkDisc)}</div>
     <div class="actions">${calLink(t.questions)}</div>`;

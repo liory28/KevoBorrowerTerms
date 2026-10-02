@@ -36,3 +36,8 @@ export function session(req) {
 
 // Approver-only actions fall back to the team login when no approver password is configured.
 export function canApprove(s) { return Boolean(s) && (s.role === 'approver' || !approverEnabled()); }
+
+// Signs the hand-off from the API to the background approval reader.
+export function jobKey(id, job) {
+  return crypto.createHmac('sha256', SECRET()).update(`approval:${id}:${job}`).digest('hex');
+}

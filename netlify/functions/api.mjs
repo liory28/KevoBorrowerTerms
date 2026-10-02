@@ -1,9 +1,13 @@
 // Single API function for the terms-confirmation portal. Routes live under /api/*.
 import { buildTerms, scenario, fmt, r2 } from '../../public/js/calc.mjs';
 import { loans, tokens, files, newId, newToken, hashToken, getLoan, updateLoan, listLoans } from './lib/store.mjs';
-import { session, checkPassword, makeSessionCookie, clearCookie, canApprove, approverEnabled } from './lib/auth.mjs';
-import { deliver, borrowerEmail, copySubject, teamRecipients, approverRecipients, allInternal, esc } from './lib/email.mjs';
-import { systemPrompt, askAI, aiConfigured } from './lib/ai.mjs';
+import { session, checkPassword, makeSessionCookie, clearCookie, canApprove, approverEnabled, jobKey } from './lib/auth.mjs';
+import { deliver, borrowerEmail, copySubject, teamRecipients, approverRecipients, allInternal, esc, textToHtml } from './lib/email.mjs';
+import { systemPrompt, askAI, aiConfigured, polishText, polishModes } from './lib/ai.mjs';
+import { deliverSms, borrowerText, smsEnabled, normalizePhone } from './lib/sms.mjs';
+import { PROVIDERS, RECEIVERS, TIMINGS, STATUSES } from './lib/approval-ai.mjs';
+import { getAllFormats, saveFormat, resetFormat, FORMAT_KINDS } from './lib/formats.mjs';
+import { createJob, jobsStore, JOB_KINDS } from './lib/jobs.mjs';
 
 export const config = { path: '/api/*' };
 
@@ -42,7 +46,7 @@ function borrowerView(loan, { preview = false } = {}) {
     result: loan.uw.result, approvedLtv: loan.uw.approvedLtv ?? null, approvedLoanAmount: loan.uw.approvedLoanAmount ?? null,
     approvedRate: loan.uw.approvedRate ?? null, reason: loan.uw.reason || '', rateAtSubmission: terms?.rate ?? null
   } : null;
-  const lock = loan.status === 'locked' && loan.lock ? { rate: loan.lock.rate, expires: loan.lock.expires, payment: loan.lock.payment, conditions: loan.lock.conditions || [] } : null;
+  const lock = loan.status === 'locked' && loan.lock ? { rate: loan.lock.rate, expires: loan.lock.expires, payment: loan.lock.payment, conditions: loan.lock.conditions || [], items: borrowerItems(loan) } : null;
   return {
     stage, status: loan.status, version: loan.version || 0, preview,
     lang: loan.inputs?.language === 'he' ? 'he' : 'en',
@@ -50,6 +54,16 @@ function borrowerView(loan, { preview = false } = {}) {
     response: preview ? null : (loan.response && loan.response.v === loan.version ? { action: loan.response.action, choices: loan.response.choices, at: loan.response.at, numbers: loan.response.numbers } : null),
     aiEnabled: aiConfigured()
   };
+}
+
+// The borrower's checklist: their items from the approval (plain English + why), plus any extra lines the team added at lock.
+function borrowerItems(loan) {
+  const he = loan.inputs?.language === 'he';
+  const fromApproval = loan.approval?.status === 'done' ? (loan.approval.conditions || []).filter((c) => c.borrowerVisible).map((c) => ({
+    text: c.plain, why: c.why, textHe: c.plainHe || (he ? '' : ''), whyHe: c.whyHe || '', timing: c.timing, done: ['received', 'cleared'].includes(c.status)
+  })) : [];
+  const extra = (loan.lock?.conditions || []).map((t) => ({ text: t, why: '', textHe: '', whyHe: '', timing: 'other', done: false }));
+  return [...fromApproval, ...extra];
 }
 
 async function record(id, entry, text) {
@@ -87,7 +101,7 @@ async function createLoan(req, s) {
   return json({ id });
 }
 
-const INPUT_KEYS = ['borrowerName', 'borrowerEmail', 'borrowerPhone', 'language', 'transaction', 'estimatedValue', 'lockStatus', 'foreignNational', 'pppYears', 'pppSchedule', 'interestOnly', 'ioYears', 'impounds', 'loName', 'calendlyUrl', 'noteToBorrower'];
+const INPUT_KEYS = ['smsConsent', 'processorName', 'processorEmail', 'titleEmail', 'insuranceEmail', 'appraiserEmail', 'borrowerName', 'borrowerEmail', 'borrowerPhone', 'language', 'transaction', 'estimatedValue', 'lockStatus', 'foreignNational', 'pppYears', 'pppSchedule', 'interestOnly', 'ioYears', 'impounds', 'loName', 'calendlyUrl', 'noteToBorrower'];
 function sanitizeInputs(x) {
   const o = {};
   for (const k of INPUT_KEYS) if (k in x) o[k] = x[k];
@@ -109,6 +123,9 @@ function sanitizeInputs(x) {
   if ('loName' in o) o.loName = str(o.loName, 80);
   if ('calendlyUrl' in o) { o.calendlyUrl = str(o.calendlyUrl, 300); if (o.calendlyUrl && !/^https:\/\//.test(o.calendlyUrl)) o.calendlyUrl = ''; }
   if ('noteToBorrower' in o) o.noteToBorrower = str(o.noteToBorrower, 600);
+  if ('smsConsent' in o) o.smsConsent = Boolean(o.smsConsent);
+  if ('processorName' in o) o.processorName = str(o.processorName, 80);
+  for (const k of ['processorEmail', 'titleEmail', 'insuranceEmail', 'appraiserEmail']) if (k in o) { o[k] = str(o[k], 160); if (o[k] && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(o[k])) o[k] = ''; }
   return o;
 }
 
@@ -117,7 +134,7 @@ async function loanDetail(req, s, id) {
   if (!loan) return err('Not found', 404);
   const c = computed(loan);
   const cur = (loan.versions || []).find((x) => x.v === loan.version);
-  return json({ loan, ...c, sentTerms: cur?.terms || null, scenarioNow: scenario(c.terms, {}), borrowerUrl: loan.currentToken ? borrowerUrl(req, loan.currentToken) : null, me: { ...s, canApprove: canApprove(s) }, aiEnabled: aiConfigured(), emailEnabled: Boolean(process.env.RESEND_API_KEY && process.env.FROM_EMAIL) });
+  return json({ loan, ...c, sentTerms: cur?.terms || null, scenarioNow: scenario(c.terms, {}), borrowerUrl: loan.currentToken ? borrowerUrl(req, loan.currentToken) : null, me: { ...s, canApprove: canApprove(s) }, aiEnabled: aiConfigured() || Boolean(process.env.MOCK_AI), emailEnabled: Boolean(process.env.RESEND_API_KEY && process.env.FROM_EMAIL), smsEnabled: smsEnabled() || Boolean(process.env.MOCK_SMS) });
 }
 
 async function saveInputs(req, s, id) {
@@ -190,7 +207,8 @@ async function sendToBorrower(req, s, id) {
   const mail = borrowerEmail(version > 1 ? 'requestV2' : 'request', loan.inputs.language, { name: loan.inputs.borrowerName, url, lo: loan.inputs.loName });
   const e = await deliver({ type: 'borrower_request', to: loan.inputs.borrowerEmail, subject: mail.subject, html: mail.html, replyTo: approverRecipients()[0] });
   await record(id, e, e.sent ? `Request emailed to ${loan.inputs.borrowerEmail}.` : `Email not sent: ${e.error} Copy the link and send it yourself.`);
-  return json({ ok: true, url, emailed: e.sent, emailError: e.error });
+  const t = await textBorrower(id, loan, version > 1 ? 'requestV2' : 'request', url);
+  return json({ ok: true, url, emailed: e.sent, emailError: e.error, texted: t?.sent ?? null, textError: t?.error || null });
 }
 
 async function resendLink(req, s, id) {
@@ -201,7 +219,8 @@ async function resendLink(req, s, id) {
   const mail = borrowerEmail('reminder', loan.inputs.language, { name: loan.inputs.borrowerName, url: borrowerUrl(req, loan.currentToken), lo: loan.inputs.loName });
   const e = await deliver({ type: 'borrower_reminder', to: loan.inputs.borrowerEmail, subject: mail.subject, html: mail.html, replyTo: approverRecipients()[0] });
   await record(id, e, e.sent ? `Reminder emailed by ${s.name} (same link, nothing changed).` : `Reminder not sent: ${e.error}`);
-  return json({ ok: true, emailed: e.sent, emailError: e.error });
+  const t = await textBorrower(id, loan, 'reminder', borrowerUrl(req, loan.currentToken));
+  return json({ ok: true, emailed: e.sent, emailError: e.error, texted: t?.sent ?? null, textError: t?.error || null });
 }
 
 async function revise(req, s, id) {
@@ -252,7 +271,7 @@ async function recordLock(req, s, id) {
     const payment = b.payment !== '' && b.payment !== null && b.payment !== undefined && Number.isFinite(Number(b.payment)) ? r2(b.payment) : (Math.abs(rate - (v?.terms?.rate ?? rate)) < 1e-9 ? confirmedPayment : null);
     if (payment === null) return { error: 'The locked rate differs from the confirmed rate, so enter the new monthly payment.' };
     loan.lock = { rate, expires: b.expires, payment, conditions, recordedAt: now(), recordedBy: s.name };
-    if (b.notify) { loan.status = 'locked'; event(loan, s, 'locked', `Rate locked at ${rate}% until ${b.expires}. ${conditions.length} item(s) requested.`); }
+    if (b.notify) { loan.status = 'locked'; event(loan, s, 'locked', `Rate locked at ${rate}% until ${b.expires}. ${borrowerItems(loan).length} borrower item(s) on the checklist.`); }
     else event(loan, s, 'lock_draft', 'Lock details saved (borrower not notified yet).');
   });
   if (r.error) return err(r.error, 409);
@@ -265,7 +284,112 @@ async function notifyBorrower(req, id, kind) {
   const mail = borrowerEmail(kind, loan.inputs.language, { name: loan.inputs.borrowerName, url: borrowerUrl(req, loan.currentToken), lo: loan.inputs.loName });
   const e = await deliver({ type: `borrower_${kind}`, to: loan.inputs.borrowerEmail, subject: mail.subject, html: mail.html, replyTo: approverRecipients()[0] });
   await record(id, e, e.sent ? `Borrower emailed: ${mail.subject}.` : `Borrower email not sent: ${e.error} Copy the link and send it yourself.`);
+  await textBorrower(id, loan, kind, borrowerUrl(req, loan.currentToken));
   return e;
+}
+
+// Texts the borrower only if they agreed to texts and have a valid mobile number.
+async function textBorrower(id, loan, kind, url) {
+  if (!loan.inputs?.smsConsent || !normalizePhone(loan.inputs?.borrowerPhone)) return null;
+  const t = await deliverSms({ type: `borrower_${kind}_sms`, to: loan.inputs.borrowerPhone, body: borrowerText(kind, loan.inputs.language, { name: loan.inputs.borrowerName, lo: loan.inputs.loName, url }) });
+  await record(id, t, t.sent ? `Text sent to ${loan.inputs.borrowerPhone}.` : `Text not sent: ${t.error}`);
+  return t;
+}
+
+// ---------------- Underwriting approval + conditions ----------------
+const APPROVAL_STATUSES = ['confirmed', 'uw_approved', 'uw_restructure', 'uw_declined', 'locked'];
+
+async function startApprovalJob(req, id, job) {
+  const url = `${new URL(req.url).origin}/.netlify/functions/approval-background`;
+  try { await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, job, key: jobKey(id, job) }) }); }
+  catch (e) { console.error('[approval trigger]', e); }
+}
+
+async function uploadApproval(req, s, id) {
+  const b = await readBody(req);
+  const text = String(b.text || '');
+  if (text.replace(/\s/g, '').length < 200) return err('Could not read text from this PDF. Is it a scanned image? Upload the approval exported from the loan system.');
+  let bytes = null;
+  if (b.file?.base64) { bytes = Buffer.from(b.file.base64, 'base64'); if (bytes.length > MAX_PDF) return err('The PDF must be 4 MB or smaller.', 413); if (bytes.subarray(0, 4).toString() !== '%PDF') return err('That file is not a PDF.'); }
+  if (!aiConfigured() && !process.env.MOCK_AI) return err('Reading approvals needs an AI key (OPENAI_API_KEY or ANTHROPIC_API_KEY) in Netlify.', 503);
+  const job = newToken().slice(0, 16);
+  let n = 1;
+  const r = await updateLoan(id, (loan) => {
+    if (!APPROVAL_STATUSES.includes(loan.status)) return { error: 'Upload the approval after the borrower confirms the request.' };
+    n = (loan.approvalUploads || 0) + 1; loan.approvalUploads = n;
+    if (loan.approval?.status === 'done') loan.approvalPrevious = { conditions: loan.approval.conditions, uploadedAt: loan.approval.uploadedAt };
+    loan.approval = { status: 'processing', job, n, uploadedAt: now(), uploadedBy: s.name, textKey: `${id}/approval/${n}.txt`, file: bytes ? { name: String(b.file.name || 'approval.pdf').slice(0, 120), key: `${id}/approval/${n}.pdf`, size: bytes.length } : null };
+    event(loan, s, 'approval_upload', `Underwriting approval uploaded${bytes ? ` (${b.file.name})` : ''}${n > 1 ? ` (upload #${n}; progress on matching conditions is kept)` : ''}.`);
+  });
+  if (r.error) return err(r.error, 409);
+  await files().set(`${id}/approval/${n}.txt`, text.slice(0, 300000));
+  if (bytes) await files().set(`${id}/approval/${n}.pdf`, bytes, { metadata: { name: b.file.name } });
+  await startApprovalJob(req, id, job);
+  return json({ ok: true });
+}
+
+async function retryApproval(req, s, id) {
+  const job = newToken().slice(0, 16);
+  const r = await updateLoan(id, (loan) => {
+    if (!loan.approval || loan.approval.status === 'done') return { error: 'Nothing to retry.' };
+    loan.approval = { ...loan.approval, status: 'processing', job, error: null, retriedAt: now() };
+  });
+  if (r.error) return err(r.error, 409);
+  await startApprovalJob(req, id, job);
+  return json({ ok: true });
+}
+
+async function saveConditions(req, s, id) {
+  const b = await readBody(req);
+  const updates = Array.isArray(b.updates) ? b.updates.slice(0, 200) : [];
+  const r = await updateLoan(id, (loan) => {
+    if (loan.approval?.status !== 'done') return { error: 'No conditions to update yet.' };
+    const byId = new Map(loan.approval.conditions.map((c) => [c.id, c]));
+    const statusChanges = [];
+    for (const u of updates) {
+      const c = byId.get(u.id); if (!c) continue;
+      for (const [k, max] of [['plain', 800], ['why', 300], ['plainHe', 800], ['whyHe', 300]]) if (typeof u[k] === 'string' && u[k].trim() !== c[k]) { c[k] = u[k].trim().slice(0, max); c.edited = { ...(c.edited || {}), [k]: true }; }
+      if (PROVIDERS.includes(u.provider) && u.provider !== c.provider) { c.provider = u.provider; c.edited = { ...(c.edited || {}), provider: true }; }
+      if (RECEIVERS.includes(u.receiver) && u.receiver !== c.receiver) { c.receiver = u.receiver; c.edited = { ...(c.edited || {}), receiver: true }; }
+      if (TIMINGS.includes(u.timing) && u.timing !== c.timing) { c.timing = u.timing; c.edited = { ...(c.edited || {}), timing: true }; }
+      if (typeof u.borrowerVisible === 'boolean' && u.borrowerVisible !== c.borrowerVisible) { c.borrowerVisible = u.borrowerVisible; c.edited = { ...(c.edited || {}), borrowerVisible: true }; }
+      if (STATUSES.includes(u.status) && u.status !== c.status) { statusChanges.push(`#${c.num} ${c.status} → ${u.status}`); c.status = u.status; c.statusAt = now(); c.statusBy = s.name; }
+    }
+    if (b.drafts && typeof b.drafts === 'object') for (const [k, d] of Object.entries(b.drafts)) if (loan.approval.drafts?.[k] && d) loan.approval.drafts[k] = { subject: String(d.subject || '').slice(0, 200), body: String(d.body || '').slice(0, 8000), to: String(d.to || '').slice(0, 300) };
+    event(loan, s, 'conditions', statusChanges.length ? `Checklist updated: ${statusChanges.join(', ')}.` : 'Checklist edited.');
+  });
+  if (r.error) return err(r.error, 409);
+  return json({ ok: true });
+}
+
+async function sendMessage(req, s, id) {
+  const b = await readBody(req);
+  const loan = await getLoan(id);
+  if (!loan) return err('Not found', 404);
+  const body = String(b.body || '').trim();
+  if (!body) return err('The message is empty.');
+  if (b.channel === 'sms') {
+    if (!loan.inputs?.smsConsent) return err('The borrower has not agreed to receive texts. Tick "Borrower agreed to texts" in Loan details first.');
+    const t = await deliverSms({ type: `manual_${b.kind || 'text'}`, to: loan.inputs.borrowerPhone, body: body.slice(0, 1200) });
+    await record(id, t, t.sent ? `${s.name} texted the borrower.` : `Text not sent: ${t.error}`);
+    return t.sent ? json({ ok: true }) : err(t.error, 502);
+  }
+  const to = String(b.to || '').split(/[,;\s]+/).map((x) => x.trim()).filter((x) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(x)).slice(0, 10);
+  if (!to.length) return err('Enter a valid email address to send to.');
+  const subject = String(b.subject || '').trim().slice(0, 200) || 'Loan update';
+  const replyTo = loan.inputs?.processorEmail && b.kind !== 'borrowerEmail' ? loan.inputs.processorEmail : approverRecipients()[0];
+  const cc = [...new Set([loan.inputs?.processorEmail, ...approverRecipients()].filter((x) => x && !to.includes(x)))];
+  const e = await deliver({ type: `manual_${b.kind || 'email'}`, to, subject, html: textToHtml(body), replyTo, cc: b.kind === 'internalEmail' ? [] : cc });
+  await record(id, e, e.sent ? `${s.name} emailed "${subject}" to ${to.join(', ')}.` : `Email not sent: ${e.error}`);
+  return e.sent ? json({ ok: true }) : err(e.error, 502);
+}
+
+async function notifyChecklist(req, s, id) {
+  const loan = await getLoan(id);
+  if (!loan) return err('Not found', 404);
+  if (loan.status !== 'locked') return err('The borrower sees the checklist once the rate is locked.', 409);
+  const e = await notifyBorrower(req, id, 'conditions');
+  return json({ ok: true, emailed: e.sent, emailError: e.error });
 }
 
 // ---------------- Borrower handlers ----------------
@@ -392,6 +516,40 @@ export default async (req, context) => {
     if (path === 'me') return json(s ? { role: s.role, name: s.name, canApprove: canApprove(s), approverEnabled: approverEnabled() } : { role: null, approverEnabled: approverEnabled() });
     if (!s) return err('Please log in.', 401);
 
+    if (path === 'ai/polish' && m === 'POST') {
+      const b = await readBody(req);
+      const text = String(b.text || '').trim();
+      if (!text) return err('Nothing to polish yet.');
+      if (!aiConfigured() && !process.env.MOCK_AI) return err('Add an AI key (OPENAI_API_KEY or ANTHROPIC_API_KEY) in Netlify to use this.', 503);
+      try { return json(await polishText({ text, mode: polishModes.includes(b.mode) ? b.mode : 'polish', audience: ['borrower', 'party', 'internal'].includes(b.audience) ? b.audience : 'borrower' })); }
+      catch (e) { console.error('[polish]', e); return err('The AI could not rewrite this right now. Please try again.', 502); }
+    }
+    // Document formats (Settings) and background AI jobs
+    if (path === 'formats' && m === 'GET') return json({ formats: await getAllFormats(), canEdit: canApprove(s), aiEnabled: aiConfigured() || Boolean(process.env.MOCK_AI) });
+    const fm = path.match(/^formats\/([a-z]+)(\/reset)?$/);
+    if (fm && m === 'POST') {
+      if (!canApprove(s)) return err('Only the loan officer login can change document formats.', 403);
+      if (!FORMAT_KINDS[fm[1]]) return err('Unknown document type.', 404);
+      if (fm[2]) { await resetFormat(fm[1], s.name); return json({ ok: true }); }
+      const b = await readBody(req);
+      const notes = String(b.notes || '').trim();
+      if (notes.length < 40) return err('The format notes look empty.');
+      await saveFormat(fm[1], notes, s.name);
+      return json({ ok: true });
+    }
+    if (path === 'jobs' && m === 'POST') {
+      const b = await readBody(req);
+      if (!JOB_KINDS.includes(b.kind)) return err('Unknown job.');
+      if (b.kind === 'learn-format' && (!canApprove(s) || !FORMAT_KINDS[b.formatKind])) return err('Only the loan officer login can teach a new format.', 403);
+      if (String(b.text || '').replace(/\s/g, '').length < 200) return err('Could not read text from this PDF. Is it a scanned image?');
+      if (!aiConfigured() && !process.env.MOCK_AI) return err('This needs an AI key (OPENAI_API_KEY or ANTHROPIC_API_KEY) in Netlify.', 503);
+      const id = await createJob({ kind: b.kind, formatKind: b.formatKind, text: b.text, by: s.name });
+      try { await fetch(`${new URL(req.url).origin}/.netlify/functions/jobs-background`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, key: jobKey(id, 'job') }) }); } catch (e) { console.error('[job trigger]', e); }
+      return json({ id });
+    }
+    const jm = path.match(/^jobs\/([a-z0-9]+)$/);
+    if (jm && m === 'GET') { const j = await jobsStore().get(jm[1], { type: 'json' }); return j ? json({ status: j.status, result: j.result || null, error: j.error || null }) : err('Not found', 404); }
+
     if (path === 'loans' && m === 'GET') return json({ loans: (await listLoans()).map(summary) });
     if (path === 'loans' && m === 'POST') return createLoan(req, s);
     const lm = path.match(/^loans\/([a-z0-9]+)(?:\/([a-z-]+))?$/);
@@ -399,6 +557,12 @@ export default async (req, context) => {
       const [, id, action] = lm;
       if (!action && m === 'GET') return loanDetail(req, s, id);
       if (action === 'preview' && m === 'GET') { const loan = await getLoan(id); return loan ? json(borrowerView(loan, { preview: true })) : err('Not found', 404); }
+      if (action === 'approval-file' && m === 'GET') {
+        const loan = await getLoan(id); if (!loan?.approval?.file) return err('No file', 404);
+        const data = await files().get(loan.approval.file.key, { type: 'arrayBuffer' });
+        if (!data) return err('No file', 404);
+        return new Response(data, { headers: { 'content-type': 'application/pdf', 'content-disposition': `inline; filename="${loan.approval.file.name.replace(/[^\w.\- ]/g, '')}"`, 'cache-control': 'no-store' } });
+      }
       if (action === 'file' && m === 'GET') {
         const loan = await getLoan(id); if (!loan?.sourceFile) return err('No file', 404);
         const data = await files().get(loan.sourceFile.key, { type: 'arrayBuffer' });
@@ -414,6 +578,11 @@ export default async (req, context) => {
       if (action === 'revise') return revise(req, s, id);
       if (action === 'uw') return recordUW(req, s, id);
       if (action === 'lock') return recordLock(req, s, id);
+      if (action === 'approval') return uploadApproval(req, s, id);
+      if (action === 'approval-retry') return retryApproval(req, s, id);
+      if (action === 'conditions') return saveConditions(req, s, id);
+      if (action === 'message') return sendMessage(req, s, id);
+      if (action === 'notify-checklist') return notifyChecklist(req, s, id);
     }
     return err('Not found', 404);
   } catch (e) {

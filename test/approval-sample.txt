@@ -1,0 +1,18 @@
+CONDITIONAL APPROVAL  (SAMPLE - NOT A REAL LOAN)
+Borrower: Sample Borrower LLC   Loan Number: 0000000001
+Property: 100 Example St, Dallas, TX 75201
+Loan Amount: $229,125   LTV: 75.000   Rate: 7.625   Program: 30 YR FIXED DSCR 3 YR PPP
+Rate Lock Expiration: 10/19/2026   Approval Expiration: 12/30/2026
+
+PRIOR TO DOCS
+18) Provide complete bank statements, all pages including blank pages, for accounts used for closing (PTD)
+19) LOE for large deposit of $12,500 on 08/14 (PTD)
+20) Hazard insurance with 6 months rent loss coverage, deductible max 5% (PTD)
+21) Second appraisal required - flip transaction; lower value to be used (PTD)
+22) Title commitment and CPL (PTD)
+23) UCDP/SSR - lender to order (PTD)
+PRIOR TO FUNDING
+30) Seller signed warranty deed via title (PTF)
+31) LLC resolution authorizing signer (PTF)
+32) Final settlement statement signed by borrower (AC)
+33) Credit report - cleared (PTF)

@@ -1,6 +1,8 @@
 import { buildTerms, scenario, defaultInputs, fmt } from './calc.mjs';
 import { parseWorksheet } from './parse.mjs';
 import { pdfToLines } from './lines.mjs';
+import { enhancePolish } from './polish.mjs';
+import { renderApproval, wireApproval, showApprovalPanel } from './approval-ui.mjs';
 
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -25,7 +27,7 @@ async function api(path, { method = 'GET', body } = {}) {
 }
 
 function shell(inner) {
-  return `<div class="pbar"><a href="#/">Loan Terms Portal</a><div class="me">${ME ? `<span>${esc(ME.name)} · ${ME.role === 'approver' ? 'Loan officer' : 'Team'}</span><button id="logout">Log out</button>` : ''}</div></div><div class="wrap">${inner}</div>`;
+  return `<div class="pbar"><a href="#/">Loan Terms Portal</a><div class="me">${ME ? `<a href="#/settings" style="font-weight:600;font-size:13px">Document formats</a><span>${esc(ME.name)} · ${ME.role === 'approver' ? 'Loan officer' : 'Team'}</span><button id="logout">Log out</button>` : ''}</div></div><div class="wrap">${inner}</div>`;
 }
 
 // ---------------- Login ----------------
@@ -76,7 +78,14 @@ function inputsForm(inp, t, editable) {
       <label class="field">Interest-only period (years)<input name="ioYears" inputmode="numeric" value="${v(inp.ioYears)}" ${dis}></label>
       <label class="field">Loan officer name<input name="loName" value="${v(inp.loName)}" ${dis}></label>
       <label class="field" style="grid-column:1/-1">Scheduling link<input name="calendlyUrl" value="${v(inp.calendlyUrl)}" ${dis}></label>
-      <label class="field" style="grid-column:1/-1">Note to the borrower (optional, shown at the top of their page)<textarea name="noteToBorrower" rows="2" ${dis}>${v(inp.noteToBorrower)}</textarea></label>
+      <label class="field" style="grid-column:1/-1">Note to the borrower (optional, shown at the top of their page)<textarea name="noteToBorrower" rows="2" data-polish="borrower" ${dis}>${v(inp.noteToBorrower)}</textarea></label>
+      <label class="field check" style="grid-column:1/-1"><input type="checkbox" name="smsConsent" ${inp.smsConsent ? 'checked' : ''} ${dis}> Borrower agreed to receive text messages at the phone above</label>
+      <div style="grid-column:1/-1;font-size:13px;font-weight:700;color:var(--ink);padding-top:6px">Team &amp; parties (used for condition requests)</div>
+      <label class="field">Processor name<input name="processorName" value="${v(inp.processorName)}" ${dis}></label>
+      <label class="field">Processor email<input name="processorEmail" type="email" value="${v(inp.processorEmail)}" ${dis}></label>
+      <label class="field">Title / escrow email<input name="titleEmail" type="email" value="${v(inp.titleEmail)}" ${dis}></label>
+      <label class="field">Insurance agent email<input name="insuranceEmail" type="email" value="${v(inp.insuranceEmail)}" ${dis}></label>
+      <label class="field">Appraiser / AMC email<input name="appraiserEmail" type="email" value="${v(inp.appraiserEmail)}" ${dis}></label>
     </div></form>`;
 }
 function readInputs() {
@@ -123,6 +132,12 @@ async function readPdf(file) {
   const pages = await pdfToLines(pdfjsLib, buf.slice());
   return { worksheet: parseWorksheet(pages), base64: b64(buf) };
 }
+async function pdfText(file) {
+  if (!pdfjsLib) { pdfjsLib = await import('/vendor/pdf.min.mjs'); pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdf.worker.min.mjs'; }
+  const buf = new Uint8Array(await file.arrayBuffer());
+  const pages = await pdfToLines(pdfjsLib, buf.slice());
+  return { text: pages.map((p, i) => `--- Page ${i + 1} ---\n` + p.join('\n')).join('\n'), base64: b64(buf) };
+}
 function b64(bytes) { let s = ''; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000)); return btoa(s); }
 
 function dropZone(id, label) {
@@ -143,14 +158,22 @@ function viewNew() {
     let parsed;
     try { if (file.size > 4 * 1024 * 1024) throw new Error('The PDF must be 4 MB or smaller.'); parsed = await readPdf(file); }
     catch (e) { $('#new-body').innerHTML = `<div class="msgline err">Could not read this PDF: ${esc(e.message)}</div>`; return; }
-    const ws = parsed.worksheet;
+    let ws = parsed.worksheet;
     let inputs = defaultInputs(ws);
+    const readable = (w) => w.header?.borrower && w.header?.program && w.gross && (w.sections || []).length >= 5 && !(w.warnings || []).length;
     const draw = () => {
       const { terms, checks } = buildTerms(ws, inputs);
-      $('#new-body').innerHTML = `<div class="grid2" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px;align-items:start">
+      const fallback = !readable(ws) && ws.readBy !== 'ai' ? `<div class="banner-alert" style="margin-bottom:16px"><strong>This worksheet didn't read cleanly.</strong> <span class="small" style="padding:0">The layout may have changed. Fix the fields by hand, or let AI read it instead (every number is still checked against the worksheet's totals).</span><div class="row-actions" style="margin-top:10px"><button class="btn secondary" id="ai-read" style="min-height:40px;font-size:13px">Read with AI instead</button><span id="ai-msg" class="small" style="padding:0"></span></div></div>` : '';
+      $('#new-body').innerHTML = fallback + `<div class="grid2" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px;align-items:start">
         <div class="tcard"><h3>Loan details</h3><p class="small" style="padding:0 0 10px">${esc(ws.header.borrower)} · ${esc(ws.header.property)} · ${esc(ws.header.program)} · Loan # ${esc(ws.header.loanNumber)}</p>${inputsForm(inputs, terms, true)}
           <div id="new-msg" style="margin-top:12px"></div><div class="row-actions" style="margin-top:12px"><button class="btn primary" id="create">Create loan</button></div></div>
         <div style="display:flex;flex-direction:column;gap:16px"><div class="tcard"><h3>Checks</h3>${checksHtml(checks)}</div><div class="tcard"><h3>What the borrower will see</h3>${termsHtml(terms)}</div></div></div>`;
+      enhancePolish($('#new-body'));
+      $('#ai-read')?.addEventListener('click', async (e) => {
+        e.target.disabled = true; $('#ai-msg').textContent = 'The AI is reading the worksheet. This can take a minute…';
+        try { const { text } = await pdfText(file); const r = await runJob({ kind: 'read-worksheet', text }); ws = r.worksheet; inputs = { ...defaultInputs(ws), ...inputs, borrowerName: inputs.borrowerName || ws.header?.borrower || '' }; draw(); }
+        catch (er) { $('#ai-msg').textContent = er.message; e.target.disabled = false; }
+      });
       $('#inputs-form').addEventListener('change', () => { inputs = { ...inputs, ...readInputs() }; setTimeout(draw, 0); });
       $('#create').addEventListener('click', async () => {
         inputs = { ...inputs, ...readInputs() };
@@ -159,6 +182,51 @@ function viewNew() {
       });
     };
     draw();
+  });
+}
+
+// ---------------- Background AI jobs ----------------
+async function runJob(body, onTick) {
+  const { id } = await api('jobs', { method: 'POST', body });
+  for (let i = 0; i < 150; i++) {
+    await new Promise((r) => setTimeout(r, 2500));
+    const j = await api(`jobs/${id}`);
+    if (j.status === 'done') return j.result;
+    if (j.status === 'failed') throw new Error(j.error || 'The AI could not finish this.');
+    onTick?.(i);
+  }
+  throw new Error('This is taking too long. Please try again.');
+}
+
+// ---------------- Settings: document formats ----------------
+async function viewSettings() {
+  app().innerHTML = shell('<p class="lead">Loading…</p>');
+  const { formats, canEdit, aiEnabled } = await api('formats');
+  app().innerHTML = shell(`<a href="#/">← Loans</a><h1>Document formats</h1>
+    <p class="lead" style="max-width:820px">These notes tell the AI how each document is laid out. If the loan system changes a layout, upload a sample of the new version: the AI drafts updated notes, you review them, and from then on every upload uses them. ${canEdit ? '' : 'Only the loan officer login can change them.'}${aiEnabled ? '' : ' <strong>Add an AI key in Netlify to use this.</strong>'}</p>
+    ${Object.entries(formats).map(([k, f]) => `<div class="tcard fmt" data-kind="${k}"><div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:baseline"><h3 style="margin:0">${esc(f.label)}</h3>
+        <span class="small" style="padding:0">${f.isDefault ? 'Built-in notes' : `Updated ${esc(when(f.updatedAt))} by ${esc(f.updatedBy)}`}</span></div>
+      ${k === 'worksheet' ? '<p class="small" style="padding:6px 0 0">Worksheets are read by a built-in reader first (exact, no AI). These notes are used only when a worksheet doesn\'t read cleanly and you choose "Read with AI instead".</p>' : ''}
+      <label class="field" style="margin-top:10px">Layout notes<textarea name="notes" rows="14" ${canEdit ? '' : 'disabled'} style="font-family:'IBM Plex Mono',monospace;font-size:12.5px">${esc(f.notes)}</textarea></label>
+      <div class="fmt-changes"></div>
+      ${canEdit ? `<div class="row-actions" style="margin-top:10px"><button class="btn primary" data-fmt="save">Save notes</button><button class="btn secondary" data-fmt="reset">Reset to built-in</button><span class="fmsg small" style="padding:0"></span></div>
+      <div style="margin-top:14px">${dropZone('learn-' + k, 'Learn a new layout from a sample PDF')}</div>` : ''}</div>`).join('')}`);
+  $('#logout')?.addEventListener('click', logout);
+  document.querySelectorAll('.fmt').forEach((card) => {
+    const kind = card.dataset.kind, msg = (t) => { card.querySelector('.fmsg').textContent = t; };
+    card.querySelector('[data-fmt=save]')?.addEventListener('click', async () => { try { await api(`formats/${kind}`, { method: 'POST', body: { notes: card.querySelector('[name=notes]').value } }); msg('Saved. New uploads use these notes.'); } catch (e) { msg(e.message); } });
+    card.querySelector('[data-fmt=reset]')?.addEventListener('click', async () => { if (!confirm('Replace these notes with the built-in version?')) return; try { await api(`formats/${kind}/reset`, { method: 'POST', body: {} }); viewSettings(); } catch (e) { msg(e.message); } });
+    if (card.querySelector('#learn-' + kind)) wireDrop('learn-' + kind, async (file) => {
+      try {
+        msg('Reading the sample…');
+        const { text } = await pdfText(file);
+        msg('The AI is studying the layout. This can take a minute…');
+        const r = await runJob({ kind: 'learn-format', formatKind: kind, text });
+        card.querySelector('[name=notes]').value = r.notes;
+        card.querySelector('.fmt-changes').innerHTML = `<div class="banner-ok" style="margin-top:10px;font-size:13px"><strong>Draft ready. Review it, then click Save notes.</strong>${(r.changes || []).length ? `<div style="margin-top:6px">What changed:</div>${r.changes.map((c) => `<div>• ${esc(c)}</div>`).join('')}` : '<div style="margin-top:6px">No layout differences found.</div>'}</div>`;
+        msg('Not saved yet.');
+      } catch (e) { msg(e.message); }
+    });
   });
 }
 
@@ -225,7 +293,7 @@ async function viewLoan(id) {
         <div class="grid-f"><label class="field">Approved LTV %<input name="approvedLtv" inputmode="decimal" value="${esc(u.approvedLtv ?? sentT.ltv ?? '')}"></label>
           <label class="field">Approved rate %<input name="approvedRate" inputmode="decimal" value="${esc(u.approvedRate ?? sentT.rate ?? '')}"></label>
           <label class="field">Approved loan amount<input name="approvedLoanAmount" inputmode="decimal" value="${esc(u.approvedLoanAmount ?? sentT.loanAmount ?? '')}"></label></div>
-        <label class="field">What changed and why (shown to the borrower; required for restructure or decline)<textarea name="reason" rows="3" placeholder="e.g. Underwriting capped loan-to-value at 70% for this property type.">${esc(u.reason || '')}</textarea></label>
+        <label class="field">What changed and why (shown to the borrower; required for restructure or decline)<textarea name="reason" rows="3" data-polish="borrower" placeholder="e.g. Underwriting capped loan-to-value at 70% for this property type.">${esc(u.reason || '')}</textarea></label>
         <div id="uw-warn"></div>
         <div class="row-actions"><button class="btn secondary" data-uw="save">Save</button>${canApprove ? '<button class="btn primary" data-uw="notify">Save &amp; notify borrower</button>' : ''}</div></form></div>`;
     }
@@ -238,7 +306,8 @@ async function viewLoan(id) {
         <label class="field">Locked rate %<input name="rate" inputmode="decimal" value="${esc(rate)}"></label>
         <label class="field">Lock expires<input name="expires" type="date" value="${esc(k.expires || '')}"></label>
         <label class="field">Monthly payment<input name="payment" inputmode="decimal" value="${esc(k.payment ?? '')}" placeholder="Leave blank if the rate didn't change"><span class="hint">Needed only if the locked rate differs from ${sentT.rate}%.</span></label></div>
-        <label class="field">Items needed from the borrower (one per line, plain English)<textarea name="conditions" rows="5" placeholder="Last 2 months of bank statements, all pages">${esc((k.conditions || []).join('\n'))}</textarea></label>
+        ${L.approval?.status === 'done' ? `<div class="banner-ok" style="font-size:13px">The borrower's checklist comes from the approval: <strong>${(L.approval.conditions || []).filter((c) => c.borrowerVisible).length} item(s)</strong>, with a short "why" on each. Add anything extra below.</div>` : ''}
+        <label class="field">${L.approval?.status === 'done' ? 'Extra items for the borrower (optional, one per line)' : 'Items needed from the borrower (one per line, plain English)'}<textarea name="conditions" rows="4" data-polish="borrower" placeholder="Last 2 months of bank statements, all pages">${esc((k.conditions || []).join('\n'))}</textarea></label>
         <div class="row-actions"><button class="btn secondary" data-lock="save">Save</button>${canApprove ? `<button class="btn primary" data-lock="notify">${st === 'locked' ? 'Update &amp; notify borrower' : 'Save &amp; notify borrower'}</button>` : ''}</div></form></div>`;
     }
 
@@ -261,7 +330,7 @@ async function viewLoan(id) {
             ${editable ? dropZone('replace', 'Upload a new worksheet for this loan') : ''}</div>
         </div>
         <div style="display:flex;flex-direction:column;gap:16px">
-          ${respPanel}${uwPanel}${lockPanel}
+          ${respPanel}${showApprovalPanel(st) ? renderApproval(D) : ''}${uwPanel}${lockPanel}
           <div class="tcard"><h3>Borrower questions to the AI assistant</h3>${chat.length ? chat.slice(0, 15).map((c) => `<div class="qa"><div class="q" dir="auto">${esc(c.q)}</div><div class="a" dir="auto">${esc(c.a)}</div><div class="small" style="padding:2px 0 0">v${c.v} · ${esc(when(c.at))} · ${esc(c.provider)}</div></div>`).join('') : `<div class="small">None yet.${D.aiEnabled ? '' : ' The assistant uses prewritten answers until an AI key is added.'}</div>`}</div>
           <div class="tcard"><h3>Activity</h3>${(L.events || []).slice().reverse().map((e) => `<div class="log"><div class="w">${esc(when(e.at))}</div><div style="color:var(--ink2)"><strong>${esc(e.by)}</strong> ${esc(e.text)}</div></div>`).join('')}</div>
           <div class="tcard"><h3>Emails</h3>${(L.notifications || []).length ? (L.notifications || []).slice().reverse().map((n) => `<div class="log"><div class="w">${esc(when(n.at))}</div><div style="color:var(--ink2)">${n.sent ? '✓' : '<span class="bad">Not sent</span>'} ${esc(n.subject)} → ${esc((n.to || []).join(', '))}${n.error ? `<div class="small bad" style="padding:0">${esc(n.error)}</div>` : ''}</div></div>`).join('') : '<div class="small">None yet.</div>'}</div>
@@ -269,6 +338,8 @@ async function viewLoan(id) {
 
     // wire events
     $('#logout')?.addEventListener('click', logout);
+    enhancePolish(app());
+    if (showApprovalPanel(st)) wireApproval(D, { api, reload, flash: (ok, text) => flash('#top-msg', ok, text), pdfText });
     $('#copy')?.addEventListener('click', async (e) => { e.preventDefault(); try { await navigator.clipboard.writeText($('#blink').value); e.target.textContent = 'Copied'; } catch { $('#blink').select(); } });
     if (editable) {
       $('#inputs-form').addEventListener('change', () => { inputs = { ...inputs, ...readInputs() }; const y = window.scrollY; setTimeout(() => { draw(); window.scrollTo(0, y); }, 0); });
@@ -283,7 +354,7 @@ async function viewLoan(id) {
       if (a === 'send') {
         if (EDITABLE.includes(st) && JSON.stringify(inputs) !== JSON.stringify(D.loan.inputs)) await api(`loans/${id}/inputs`, { method: 'POST', body: { inputs } });
         if (!confirm(`Send ${L.version ? 'the updated request' : 'this request'} to ${inputs.borrowerEmail}?`)) return;
-        await act('send', {}, (r) => r.emailed ? 'Sent. The borrower was emailed the link.' : `Link created, but the email was not sent (${r.emailError}). Copy the link below and send it yourself.`);
+        await act('send', {}, (r) => (r.emailed ? 'Sent. The borrower was emailed the link.' : `Link created, but the email was not sent (${r.emailError}). Copy the link below and send it yourself.`) + (r.texted === true ? ' A text was sent too.' : r.texted === false ? ` Text not sent: ${r.textError}` : ''));
       }
       if (a === 'ready') { if (JSON.stringify(inputs) !== JSON.stringify(D.loan.inputs)) await api(`loans/${id}/inputs`, { method: 'POST', body: { inputs } }); await act('ready', {}, 'Marked ready. The loan officer was notified.'); }
       if (a === 'resend') await act('resend', {}, (r) => r.emailed ? 'Reminder emailed.' : `Reminder not sent: ${r.emailError}`);
@@ -316,6 +387,7 @@ async function route() {
   const h = location.hash.replace(/^#/, '') || '/';
   try {
     if (h === '/new') viewNew();
+    else if (h === '/settings') await viewSettings();
     else if (h.startsWith('/loan/')) await viewLoan(h.split('/')[2]);
     else await viewDashboard();
   } catch (e) { if (ME) app().innerHTML = shell(`<div class="msgline err">${esc(e.message)}</div><p><a href="#/">Back to loans</a></p>`); }

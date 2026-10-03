@@ -113,7 +113,11 @@ async function callOpenAI({ system, messages, maxTokens, json, effort, timeoutMs
   const model = process.env.OPENAI_MODEL || 'gpt-5-mini';
   const body = { model, instructions: system, input: messages, store: false, max_output_tokens: maxTokens };
   if (isReasoningModel(model)) body.reasoning = { effort };
-  if (json) body.text = { format: { type: 'json_object' } };
+  if (json) {
+    // OpenAI's JSON mode requires the word "json" in the input messages themselves (instructions don't count).
+    body.text = { format: { type: 'json_object' } };
+    body.input = [{ role: 'user', content: 'Reply with one JSON object only, in the exact shape described in the instructions.' }, ...messages];
+  }
   const d = await post('chatgpt', openaiUrl(),
     { authorization: `Bearer ${process.env.OPENAI_API_KEY.trim()}`, 'content-type': 'application/json' }, body, timeoutMs);
   const text = openaiText(d);
@@ -170,10 +174,10 @@ ${POLISH_MODES[mode] || POLISH_MODES.polish}
 Strict rules:
 - Keep every fact exactly: numbers, dollar amounts, percentages, dates, names, loan numbers, addresses, emails, phone numbers and links.
 - Do not add new facts, promises, approvals, rates or deadlines. Do not remove requirements.
-- Keep placeholders like [Agent Name] as they are.
+- Keep placeholders like [Agent Name] as they are.${mode === 'hebrew' || mode === 'english' ? '' : '\n- Reply in the same language the message is written in (Hebrew stays Hebrew, English stays English).'}
 - Keep the same format (email stays an email, a list stays a list, a text message stays short).
 - Return only the rewritten message, with no preface or explanation.`;
-  if (process.env.MOCK_AI) return { text: `[polished] ${text}`, provider: 'mock' };
+  if (process.env.MOCK_AI) return { text: mode === 'hebrew' ? `בעברית: ${text}` : mode === 'english' ? `In English: ${text.replace(/[\u0590-\u05FF:]+\s*/g, '').trim()}` : `[${mode}] ${text}`, provider: 'mock' };
   const out = await askAI(system, [{ role: 'user', content: String(text).slice(0, 8000) }], 2500);
   return { text: out.answer.replace(/^"|"$/g, '').trim(), provider: out.provider };
 }

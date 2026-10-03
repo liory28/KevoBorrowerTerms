@@ -174,7 +174,7 @@ function viewNew() {
         try { const { text } = await pdfText(file); const r = await runJob({ kind: 'read-worksheet', text }); ws = r.worksheet; inputs = { ...defaultInputs(ws), ...inputs, borrowerName: inputs.borrowerName || ws.header?.borrower || '' }; draw(); }
         catch (er) { $('#ai-msg').textContent = er.message; e.target.disabled = false; }
       });
-      $('#inputs-form').addEventListener('change', () => { inputs = { ...inputs, ...readInputs() }; setTimeout(draw, 0); });
+      $('#inputs-form').addEventListener('change', (e) => { inputs = { ...inputs, ...readInputs() }; if (e.target.matches('textarea')) return; setTimeout(draw, 0); }); // notes don't change any numbers, and a redraw would drop an AI rewrite in progress
       $('#create').addEventListener('click', async () => {
         inputs = { ...inputs, ...readInputs() };
         try { const { id } = await api('loans', { method: 'POST', body: { worksheet: ws, inputs, file: { name: file.name, base64: parsed.base64 } } }); location.hash = `#/loan/${id}`; }
@@ -342,7 +342,7 @@ async function viewLoan(id) {
     if (showApprovalPanel(st)) wireApproval(D, { api, reload, flash: (ok, text) => flash('#top-msg', ok, text), pdfText });
     $('#copy')?.addEventListener('click', async (e) => { e.preventDefault(); try { await navigator.clipboard.writeText($('#blink').value); e.target.textContent = 'Copied'; } catch { $('#blink').select(); } });
     if (editable) {
-      $('#inputs-form').addEventListener('change', () => { inputs = { ...inputs, ...readInputs() }; const y = window.scrollY; setTimeout(() => { draw(); window.scrollTo(0, y); }, 0); });
+      $('#inputs-form').addEventListener('change', (e) => { inputs = { ...inputs, ...readInputs() }; if (e.target.matches('textarea')) return; const y = window.scrollY; setTimeout(() => { draw(); window.scrollTo(0, y); }, 0); });
       $('#save-inputs').addEventListener('click', () => { inputs = { ...inputs, ...readInputs() }; act('inputs', { inputs }, 'Saved.'); });
       wireDrop('replace', async (file) => {
         try { const p = await readPdf(file); if (!confirm(`Replace the worksheet with ${file.name}? The terms will be recalculated from it.`)) return; await act('worksheet', { worksheet: p.worksheet, file: { name: file.name, base64: p.base64 } }, 'New worksheet loaded. Review the checks.'); }

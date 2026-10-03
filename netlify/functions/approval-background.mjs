@@ -20,6 +20,10 @@ export default async (req) => {
     await updateLoan(b.id, (l) => {
       if (l.approval?.job !== b.job) return { error: 'stale' };
       const norm = normalizeApproval(out.data, l.approvalPrevious);
+      // Files uploaded for conditions that are no longer on the approval: keep track of them so closing still deletes them.
+      const kept = new Set(norm.conditions.flatMap((c) => (c.uploads || []).map((u) => u.id)));
+      const dropped = (l.approvalPrevious?.conditions || []).flatMap((c) => (c.uploads || []).map((u) => ({ ...u, condNum: c.num }))).filter((u) => !kept.has(u.id));
+      if (dropped.length) l.orphanUploads = [...(l.orphanUploads || []), ...dropped];
       l.approval = { ...l.approval, ...norm, status: 'done', error: null, processedAt: new Date().toISOString(), provider: out.provider };
       const open = norm.conditions.filter((c) => c.status !== 'cleared').length;
       // Fill the processor's name/email from the approval when the team hasn't entered them.

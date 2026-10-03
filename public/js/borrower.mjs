@@ -9,7 +9,7 @@ const params = new URLSearchParams(location.search);
 const previewId = params.get('preview');
 const token = previewId ? null : location.pathname.split('/r/')[1]?.split(/[/?#]/)[0] || params.get('t');
 
-const S = { view: null, lang: 'en', choices: { impounds: 'keep', ppp: 'keep' }, showBreakdown: false, chat: [], busy: false, sending: false, error: '' };
+const S = { view: null, lang: 'en', choices: { impounds: 'keep', ppp: 'keep' }, showBreakdown: false, chat: [], busy: false, sending: false, error: '', uploading: null, upErr: {} };
 
 // ---------------- Copy ----------------
 const C = {
@@ -90,7 +90,12 @@ const C = {
     stages: ['Requested', 'Approved', 'Locked', 'Your items', 'Closing'],
     need: 'What we need from you', items: (n) => `${n} item${n === 1 ? '' : 's'}`, progress: (d, n) => `${d} of ${n} received`, whyLbl: 'Why', received: 'Received', timing: { prior_to_docs: 'Needed now', prior_to_funding: 'Before closing', at_closing: 'At closing', post_closing: 'After closing', other: '' }, noItems: "Nothing needed right now. We'll let you know if underwriting asks for anything.",
     lkDisc: "Once these items are received and accepted by underwriting, we're cleared to close. Please send them before your lock expires.",
-    sendDocs: 'To send documents, reply to the email with this link or contact your loan team.',
+    sendDocs: 'Upload each document on its item above (a clear phone photo or a PDF). If that’s not easy, reply to our email and attach it.',
+    upBtn: 'Upload document', upMore: 'Add another file', upBusy: 'Uploading…', upTooBig: 'That file is larger than 5 MB. Try a photo of each page instead.', upFail: 'The upload didn’t go through. Please try again.',
+    upHelp: 'AI does a quick first check of each file and can make mistakes. A team member reviews every document.',
+    aiChecking: 'Checking the file…', aiGood: 'Looks good at first glance. A team member will confirm.', aiConfirm: 'A team member will confirm.', aiIssue: 'Possible issue:', aiIssueTail: 'You can upload a corrected file. A team member will also review it.', aiUnknown: 'Received. A team member will review it.',
+    upAccepted: 'Accepted by our team', upReturned: 'Our team needs a new file:', upReturnedTail: 'Please upload a corrected file.', upCleared: 'Cleared by underwriting', upFromTeam: 'added by our team',
+    clH1: 'Your loan has closed. Congratulations!', clLead: 'Thank you for trusting us with your loan. For your privacy, the documents you uploaded here have been deleted. Reach out anytime if you need anything.',
     upH1: "We're updating your terms", upLead: "Your loan team is preparing an updated version. You'll get a new link by email soon, and this page will stop working when it arrives.",
     supH1: 'This link has been replaced', supLead: 'Your loan team sent you an updated version. Please use the link in the newest email.',
     badH1: 'This link is not valid', badLead: 'Please use the link from your most recent email, or contact your loan team.',
@@ -173,7 +178,12 @@ const C = {
     stages: ['בקשה', 'אישור', 'נעילה', 'המסמכים שלך', 'סגירה'],
     need: 'מה אנחנו צריכים ממך', items: (n) => `${n} פריטים`, progress: (d, n) => `התקבלו ${d} מתוך ${n}`, whyLbl: 'למה', received: 'התקבל', timing: { prior_to_docs: 'נדרש עכשיו', prior_to_funding: 'לפני הסגירה', at_closing: 'בסגירה', post_closing: 'אחרי הסגירה', other: '' }, noItems: 'אין צורך בכלום כרגע. נעדכן אם החיתום יבקש משהו.',
     lkDisc: 'ברגע שהפריטים האלה יתקבלו ויאושרו בחיתום, אפשר לסגור. נא לשלוח אותם לפני שהנעילה פגה.',
-    sendDocs: 'כדי לשלוח מסמכים, השב למייל עם הקישור הזה או פנה לצוות ההלוואה.',
+    sendDocs: 'אפשר להעלות כל מסמך ישירות בפריט שלו למעלה (צילום ברור מהטלפון או PDF). אם זה לא נוח, אפשר להשיב למייל שלנו ולצרף אותו.',
+    upBtn: 'העלאת מסמך', upMore: 'הוספת קובץ נוסף', upBusy: 'מעלה…', upTooBig: 'הקובץ גדול מ-5MB. נסה לצלם כל עמוד בנפרד.', upFail: 'ההעלאה לא הצליחה. נא לנסות שוב.',
+    upHelp: 'בינה מלאכותית עושה בדיקה ראשונית מהירה לכל קובץ ועלולה לטעות. נציג מהצוות בודק כל מסמך.',
+    aiChecking: 'בודקים את הקובץ…', aiGood: 'במבט ראשון זה נראה תקין. נציג מהצוות יאשר.', aiConfirm: 'נציג מהצוות יאשר.', aiIssue: 'ייתכן שיש בעיה:', aiIssueTail: 'אפשר להעלות קובץ מתוקן. נציג מהצוות יבדוק גם כן.', aiUnknown: 'התקבל. נציג מהצוות יבדוק אותו.',
+    upAccepted: 'אושר על ידי הצוות', upReturned: 'הצוות צריך קובץ חדש:', upReturnedTail: 'נא להעלות קובץ מתוקן.', upCleared: 'אושר על ידי החיתום', upFromTeam: 'נוסף על ידי הצוות',
+    clH1: 'ההלוואה נסגרה. מזל טוב!', clLead: 'תודה שבחרת בנו. לשמירה על פרטיותך, המסמכים שהעלית כאן נמחקו. אנחנו כאן לכל דבר שתצטרך.',
     upH1: 'אנחנו מעדכנים את התנאים שלך', upLead: 'צוות ההלוואה מכין גרסה מעודכנת. בקרוב תקבל קישור חדש במייל, והעמוד הזה יפסיק לעבוד כשהוא יגיע.',
     supH1: 'הקישור הזה הוחלף', supLead: 'צוות ההלוואה שלח לך גרסה מעודכנת. נא להשתמש בקישור מהמייל החדש ביותר.',
     badH1: 'הקישור לא תקין', badLead: 'נא להשתמש בקישור מהמייל האחרון, או לפנות לצוות ההלוואה.',
@@ -345,10 +355,32 @@ function screenRestructure() {
 function screenLocked() {
   const v = S.view, tm = v.terms, lk = v.lock || {}, t = T();
   const he = S.lang === 'he';
-  const items = (lk.items && lk.items.length ? lk.items : (lk.conditions || []).map((c) => ({ text: c, why: '', done: false }))).map((x) => ({ ...x, text: he && x.textHe ? x.textHe : x.text, why: he && x.whyHe ? x.whyHe : x.why }));
+  const items = (lk.items && lk.items.length ? lk.items : (lk.conditions || []).map((c) => ({ text: c, why: '', done: false }))).map((x) => {
+    const latest = (x.uploads || []).filter((u) => !u.deleted).at(-1);
+    const attention = !x.cleared && latest && (latest.review?.decision === 'returned' || (!latest.review && latest.ai?.state === 'done' && latest.ai.verdict === 'needs_attention'));
+    return { ...x, text: he && x.textHe ? x.textHe : x.text, why: he && x.whyHe ? x.whyHe : x.why, attention, done: x.done && !attention };
+  });
   const open = items.filter((x) => !x.done), done = items.filter((x) => x.done);
   const st = t.stages.map((l, i) => [l, i < 3 ? 'b-done' : i === 3 && open.length ? 'b-now' : i === 3 ? 'b-done' : '']);
-  const itemHtml = (x) => `<div class="item ${x.done ? 'item-done' : ''}"><span class="box">${x.done ? ICON_OK(14) : ''}</span><span><div class="it" style="font-weight:500" dir="auto">${esc(x.text)}</div>${x.why ? `<div class="id" dir="auto"><strong>${esc(t.whyLbl)}:</strong> ${esc(x.why)}</div>` : ''}${!x.done && t.timing[x.timing] ? `<div class="id">${esc(t.timing[x.timing])}</div>` : ''}${x.done ? `<div class="id">${esc(t.received)}</div>` : ''}</span></div>`;
+  const upLine = (u) => {
+    let cls = 'neutral', msg = '';
+    if (u.review?.decision === 'accepted') { cls = 'good'; msg = t.upAccepted; }
+    else if (u.review?.decision === 'returned') { cls = 'warn'; msg = `${t.upReturned} ${he && u.review.reasonHe ? u.review.reasonHe : u.review.reason} ${t.upReturnedTail}`; }
+    else if (u.ai?.state === 'pending') { cls = 'busy'; msg = t.aiChecking; }
+    else if (u.ai?.state === 'done' && u.ai.verdict === 'looks_good') { cls = 'good'; msg = (he ? u.ai.messageHe : u.ai.message) ? `${he ? u.ai.messageHe : u.ai.message} ${t.aiConfirm}` : t.aiGood; }
+    else if (u.ai?.state === 'done' && u.ai.verdict === 'needs_attention') { cls = 'warn'; msg = `${t.aiIssue} ${(he ? u.ai.messageHe : u.ai.message) || ''} ${t.aiIssueTail}`; }
+    else msg = t.aiUnknown;
+    return `<div class="up up-${cls}"><div class="up-name" dir="auto">📄 ${esc(u.name)}${u.fromTeam ? ` · ${esc(t.upFromTeam)}` : ''}</div><div class="up-msg" dir="auto">${esc(msg)}</div></div>`;
+  };
+  const upControls = (x) => {
+    if (!x.id) return '';
+    const ups = (x.uploads || []).filter((u) => !u.deleted);
+    const busy = S.uploading === x.id;
+    return `${ups.map(upLine).join('')}${x.cleared ? `<div class="up up-good"><div class="up-msg">${esc(t.upCleared)}</div></div>` : ''}
+      ${x.canUpload && !S.view.preview ? `<label class="upbtn ${busy ? 'is-busy' : ''}"><input type="file" accept="application/pdf,image/*" multiple data-up="${esc(x.id)}" ${busy ? 'disabled' : ''} hidden>${busy ? esc(t.upBusy) : esc(ups.length ? t.upMore : t.upBtn)}</label>` : ''}
+      ${S.upErr[x.id] ? `<div class="up up-warn"><div class="up-msg">${esc(S.upErr[x.id])}</div></div>` : ''}`;
+  };
+  const itemHtml = (x) => `<div class="item ${x.done ? 'item-done' : ''}"><span class="box">${x.done ? ICON_OK(14) : ''}</span><span style="flex:1;min-width:0"><div class="it" style="font-weight:500" dir="auto">${esc(x.text)}</div>${x.why ? `<div class="id" dir="auto"><strong>${esc(t.whyLbl)}:</strong> ${esc(x.why)}</div>` : ''}${!x.done && t.timing[x.timing] ? `<div class="id">${esc(t.timing[x.timing])}</div>` : ''}${x.done && !(x.uploads || []).length ? `<div class="id">${esc(t.received)}</div>` : ''}${upControls(x)}</span></div>`;
   return `${header()}
     <div class="hero"><div class="eyebrow">${esc(t.lkEyebrow)}</div><h1>${esc(t.lkH1)}</h1>${addr(tm)}</div>
     <div class="m big"><div class="lbl">${esc(t.lockedRate)}</div><div class="num">${pct(lk.rate)}</div><div class="note">${esc(t.lockedUntil(fmtDate(lk.expires)))}</div>
@@ -356,7 +388,7 @@ function screenLocked() {
     <div class="m bars">${st.map(([l, c]) => `<div><div class="bar ${c}"></div>${esc(l)}</div>`).join('')}</div>
     <div class="m card" style="padding-bottom:14px"><div style="display:flex;justify-content:space-between;align-items:baseline;padding:12px 0 4px;gap:12px"><div style="font-size:16px;font-weight:700">${esc(t.need)}</div><div class="small" style="padding:0">${items.length ? esc(t.progress(done.length, items.length)) : ''}</div></div>
       ${items.length ? open.map(itemHtml).join('') + done.map(itemHtml).join('') : `<div class="small">${esc(t.noItems)}</div>`}
-      <div class="small" style="padding:8px 0 0">${esc(t.sendDocs)}</div></div>
+      <div class="small" style="padding:8px 0 0">${esc(t.sendDocs)}</div>${items.some((x) => x.canUpload) ? `<div class="small" style="padding:6px 0 0">${esc(t.upHelp)}</div>` : ''}</div>
     <div class="disc">${esc(t.lkDisc)}</div>
     <div class="actions">${calLink(t.questions)}</div>`;
 }
@@ -380,6 +412,7 @@ function render() {
   else if (v.stage === 'approved') html = screenApproved();
   else if (v.stage === 'restructure') html = screenRestructure();
   else if (v.stage === 'locked') html = screenLocked();
+  else if (v.stage === 'closed') html = screenMessage(t.clH1, t.clLead);
   else html = screenRequest();
   $('#app').innerHTML = `<div dir="${t.dir}">${html}</div>`;
   if ($('#q')) $('#q').value = qv;
@@ -427,6 +460,50 @@ async function respond(action) {
   S.sending = false; render();
 }
 
+// ---- Document uploads ----
+const MAX = 5 * 1024 * 1024;
+// Phone photos are large; re-encode big or unusual images to a sharp JPEG (keeps text readable).
+async function shrink(file) {
+  if (!/^image\//.test(file.type) || (file.size < 1.5 * 1024 * 1024 && /jpeg|png/.test(file.type))) return { blob: file, name: file.name };
+  const bmp = await createImageBitmap(file);
+  const k = Math.min(1, 2400 / Math.max(bmp.width, bmp.height));
+  const c = document.createElement('canvas'); c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+  c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+  const blob = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.85));
+  if (!blob) throw new Error('encode');
+  return { blob, name: file.name.replace(/\.[^.]+$/, '') + '.jpg' };
+}
+async function uploadFiles(cid, list) {
+  if (!list.length || S.uploading) return;
+  S.uploading = cid; delete S.upErr[cid]; render();
+  for (const file of list) {
+    let f = { blob: file, name: file.name };
+    try { f = await shrink(file); } catch (_) { /* send as is */ }
+    if (f.blob.size > MAX) { S.upErr[cid] = T().upTooBig; continue; }
+    try {
+      const r = await fetch(`/api/b/upload?t=${encodeURIComponent(token)}&cid=${encodeURIComponent(cid)}&name=${encodeURIComponent(f.name)}`, { method: 'POST', headers: { 'content-type': f.blob.type || 'application/octet-stream' }, body: f.blob });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) S.upErr[cid] = d.error || T().upFail; else S.view = d;
+    } catch (_) { S.upErr[cid] = T().upFail; }
+  }
+  S.uploading = null; render(); poll(0);
+}
+// While an AI check is running, refresh quietly every few seconds (up to ~3 minutes).
+let pollTimer = null;
+function pending() { return (S.view?.lock?.items || []).some((x) => (x.uploads || []).some((u) => u.ai?.state === 'pending')); }
+function poll(n) {
+  clearTimeout(pollTimer);
+  if (!pending() || n > 45 || !token) return;
+  pollTimer = setTimeout(async () => {
+    try { const r = await fetch(`/api/b?t=${encodeURIComponent(token)}&poll=1`); if (r.ok) { S.view = await r.json(); if (!S.uploading) render(); } } catch (_) { /* try again */ }
+    poll(n + 1);
+  }, 4000);
+}
+document.addEventListener('change', (e) => {
+  const inp = e.target.closest('input[data-up]'); if (!inp) return;
+  uploadFiles(inp.dataset.up, [...inp.files]); inp.value = '';
+});
+
 document.addEventListener('click', (e) => {
   const el = e.target.closest('[data-act]'); if (!el || el.disabled) return;
   const v = el.dataset.v;
@@ -456,5 +533,5 @@ document.addEventListener('submit', (e) => {
       if (previewId) $('#preview-bar').hidden = false;
     }
   } catch (_) { /* shows invalid link */ }
-  render();
+  render(); poll(0);
 })();

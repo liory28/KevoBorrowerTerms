@@ -13,7 +13,7 @@ const app = () => $('#app');
 const STATUS = {
   draft: ['Draft', ''], ready: ['Ready for LO', 'wait'], sent: ['Waiting on borrower', 'wait'], discuss: ['Borrower wants to talk', 'alert'],
   confirmed: ['Borrower confirmed', 'good'], uw_approved: ['Approved as requested', 'good'], uw_restructure: ['Restructure: call borrower', 'alert'],
-  uw_declined: ['Declined: call borrower', 'alert'], locked: ['Locked', 'good']
+  uw_declined: ['Declined: call borrower', 'alert'], locked: ['Locked', 'good'], closed: ['Closed', '']
 };
 const pill = (s) => { const [l, c] = STATUS[s] || [s, '']; return `<span class="st ${c}">${esc(l)}</span>`; };
 
@@ -53,7 +53,7 @@ async function viewDashboard() {
   const { loans } = await api('loans');
   app().innerHTML = shell(`<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap"><h1>Loans</h1><a class="btn primary" href="#/new" style="min-height:46px">+ New loan from worksheet</a></div>
     ${loans.length ? `<table class="dash"><thead><tr><th>Borrower</th><th>Property</th><th>Loan #</th><th>Status</th><th>Version</th><th>Updated</th></tr></thead><tbody>
-      ${loans.map((l) => `<tr><td><a href="#/loan/${l.id}">${esc(l.borrower || 'Borrower')}</a></td><td>${esc(l.property)}</td><td>${esc(l.loanNumber)}</td><td>${pill(l.status)}</td><td>${l.version ? 'v' + l.version : '—'}</td><td>${esc(when(l.updatedAt))}</td></tr>`).join('')}
+      ${loans.map((l) => `<tr><td><a href="#/loan/${l.id}">${esc(l.borrower || 'Borrower')}</a></td><td>${esc(l.property)}</td><td>${esc(l.loanNumber)}</td><td>${pill(l.status)}${l.toReview ? ` <span class="st alert">${l.toReview} to review</span>` : ''}</td><td>${l.version ? 'v' + l.version : '—'}</td><td>${esc(when(l.updatedAt))}</td></tr>`).join('')}
     </tbody></table>` : '<div class="tcard"><p class="lead">No loans yet. Start by uploading an Initial Fees Worksheet.</p></div>'}`);
 }
 
@@ -248,8 +248,8 @@ async function viewLoan(id) {
     const sentT = D.sentTerms;
     const resp = L.response && L.response.v === L.version ? L.response : null;
     const stages = [
-      ['Prepared', true], ['Sent to borrower', L.version > 0], ['Borrower confirmed', ['confirmed', 'uw_approved', 'uw_restructure', 'uw_declined', 'locked'].includes(st)],
-      ['Underwriting', ['uw_approved', 'uw_restructure', 'uw_declined', 'locked'].includes(st)], ['Locked', st === 'locked']
+      ['Prepared', true], ['Sent to borrower', L.version > 0], ['Borrower confirmed', ['confirmed', 'uw_approved', 'uw_restructure', 'uw_declined', 'locked', 'closed'].includes(st)],
+      ['Underwriting', ['uw_approved', 'uw_restructure', 'uw_declined', 'locked', 'closed'].includes(st)], ['Locked', ['locked', 'closed'].includes(st)], ['Closed', st === 'closed']
     ];
 
     // Primary action panel
@@ -263,14 +263,24 @@ async function viewLoan(id) {
         ${blocking.length ? `<div class="small" style="padding:8px 0 0">Fix the required items in Checks before sending.</div>` : ''}${L.version ? '<div class="small" style="padding:6px 0 0">Sending creates a new version and a new link. The old link stops working.</div>' : ''}`;
     } else if (['sent', 'discuss'].includes(st)) {
       primary = `${st === 'discuss' ? `<div class="banner-alert" style="margin-bottom:12px"><strong>The borrower wants to talk before you submit.</strong><div class="small" style="padding:4px 0 0">${esc(when(resp?.at))}. After the call, edit the details or upload a new worksheet, then send the updated request. If nothing changes, the borrower can still confirm from their page.</div></div>` : ''}
-        ${D.borrowerUrl ? `<div class="field">Borrower link (v${L.version})<div class="linkbox"><input readonly value="${esc(D.borrowerUrl)}" id="blink"><button class="btn secondary" style="min-height:40px;font-size:13px" id="copy">Copy</button></div></div>` : ''}
-        <div class="row-actions" style="margin-top:12px">${canApprove && st === 'sent' ? '<button class="btn secondary" data-do="resend">Email reminder (same link)</button>' : ''}${st === 'discuss' && canApprove ? sendBtn(`Send updated request (v${L.version + 1})`) : ''}<button class="btn link" data-do="revise">Revise terms…</button></div>`;
+        <div class="row-actions" style="margin-top:12px">${st === 'discuss' && canApprove ? sendBtn(`Send updated request (v${L.version + 1})`) : ''}<button class="btn link" data-do="revise">Revise terms…</button></div>`;
     } else if (resp && st === 'confirmed') {
       primary = `<div class="banner-ok"><strong>Confirmed by the borrower ${esc(when(resp.at))}</strong> (version ${L.version}). You can submit to underwriting.</div>`;
     } else if (st === 'locked') {
-      primary = `<div class="banner-ok"><strong>Locked at ${L.lock.rate}% until ${esc(L.lock.expires)}.</strong> The borrower's page shows the locked terms and the items needed.</div>${D.borrowerUrl ? `<div class="field" style="margin-top:12px">Borrower link<div class="linkbox"><input readonly value="${esc(D.borrowerUrl)}" id="blink"><button class="btn secondary" style="min-height:40px;font-size:13px" id="copy">Copy</button></div></div>` : ''}`;
-    } else if (st === 'uw_approved') primary = `<div class="banner-ok"><strong>Approved as requested.</strong> The borrower's page shows the approval. Lock the rate below.</div>${D.borrowerUrl ? `<div class="field" style="margin-top:12px">Borrower link<div class="linkbox"><input readonly value="${esc(D.borrowerUrl)}" id="blink"><button class="btn secondary" style="min-height:40px;font-size:13px" id="copy">Copy</button></div></div>` : ''}`;
+      primary = `<div class="banner-ok"><strong>Locked at ${L.lock.rate}% until ${esc(L.lock.expires)}.</strong> The borrower's page shows the locked terms and the items needed, and they can upload documents there.</div>${canApprove ? '<div class="row-actions" style="margin-top:10px"><button class="btn link" data-do="close">Mark loan closed…</button></div>' : ''}`;
+    } else if (st === 'closed') {
+      primary = `<div class="banner-ok"><strong>Closed ${esc(when(L.closedAt))}.</strong> The borrower's uploaded documents were deleted from the portal. Their page shows a closing message.</div>`;
+    } else if (st === 'uw_approved') primary = `<div class="banner-ok"><strong>Approved as requested.</strong> The borrower's page shows the approval. Lock the rate below.</div>`;
     else if (['uw_restructure', 'uw_declined'].includes(st)) primary = `<div class="banner-alert"><strong>${st === 'uw_declined' ? 'Declined' : 'Restructure required'}: borrower asked to schedule a call.</strong><div class="small" style="padding:4px 0 0">After the call, update the details or upload the new worksheet, then send the updated request for the borrower to confirm.</div></div><div class="row-actions" style="margin-top:12px">${sendBtn(`Send updated request (v${L.version + 1})`)}${previewBtn}</div>`;
+
+    // The borrower's link lives here at every stage after sending, with Copy / Open / Resend.
+    const LINK_STATUSES = ['sent', 'discuss', 'confirmed', 'uw_approved', 'uw_restructure', 'uw_declined', 'locked'];
+    if (D.borrowerUrl && LINK_STATUSES.includes(st)) {
+      const canText = D.smsEnabled && inputs.smsConsent && inputs.borrowerPhone;
+      const how = [D.emailEnabled ? 'emails' : '', canText ? 'texts' : ''].filter(Boolean).join(' and ');
+      primary += `<div class="field" style="margin-top:14px">Borrower link (v${L.version})<div class="linkbox"><input readonly value="${esc(D.borrowerUrl)}" id="blink"><button class="btn secondary" style="min-height:40px;font-size:13px" id="copy">Copy</button><a class="btn secondary" style="min-height:40px;font-size:13px" href="${esc(D.borrowerUrl)}" target="_blank" rel="noopener">Open</a></div></div>
+        <div class="row-actions" style="margin-top:8px"><button class="btn secondary" data-do="resend" ${how ? '' : 'disabled'}>Resend link to borrower</button><span class="small" style="padding:0">${how ? `${how[0].toUpperCase() + how.slice(1)} the same link. Nothing changes on their page.` : 'Email and texting aren’t set up: copy the link and send it yourself.'}</span></div>`;
+    }
 
     // Response panel
     const respPanel = resp ? (() => {
@@ -357,7 +367,8 @@ async function viewLoan(id) {
         await act('send', {}, (r) => (r.emailed ? 'Sent. The borrower was emailed the link.' : `Link created, but the email was not sent (${r.emailError}). Copy the link below and send it yourself.`) + (r.texted === true ? ' A text was sent too.' : r.texted === false ? ` Text not sent: ${r.textError}` : ''));
       }
       if (a === 'ready') { if (JSON.stringify(inputs) !== JSON.stringify(D.loan.inputs)) await api(`loans/${id}/inputs`, { method: 'POST', body: { inputs } }); await act('ready', {}, 'Marked ready. The loan officer was notified.'); }
-      if (a === 'resend') await act('resend', {}, (r) => r.emailed ? 'Reminder emailed.' : `Reminder not sent: ${r.emailError}`);
+      if (a === 'resend') await act('resend', {}, (r) => [r.emailed ? 'Link emailed.' : `Email not sent: ${r.emailError}`, r.texted === true ? 'Link texted.' : r.texted === false ? `Text not sent: ${r.textError}` : ''].filter(Boolean).join(' '));
+      if (a === 'close') { if (confirm('Mark this loan closed? Every document the borrower uploaded will be deleted from the portal (make sure they are in the lender’s system first). This can’t be undone.')) await act('close', {}, (r) => `Loan closed. ${r.deleted} uploaded document${r.deleted === 1 ? '' : 's'} deleted.`); }
       if (a === 'revise') { const reason = prompt('Why are the terms being revised? (kept in the activity log)'); if (reason) await act('revise', { reason }, 'Terms unlocked for editing. The borrower\'s page now says updated terms are coming.'); }
     }));
     const uwForm = $('#uw-form');

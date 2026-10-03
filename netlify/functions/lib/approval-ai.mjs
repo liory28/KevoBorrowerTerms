@@ -43,15 +43,7 @@ Return ONE JSON object, nothing else, with exactly these keys:
       "borrowerVisible": boolean     // true when the borrower must do, send, sign or decide something
     }
   ],
-  "flags": [string],                 // up to 6 short internal warnings for the loan officer
-  "drafts": {
-    "borrowerEmail": {"subject": string, "body": string},
-    "borrowerText": {"body": string},
-    "insuranceEmail": {"subject": string, "body": string} | null,
-    "titleEmail": {"subject": string, "body": string} | null,
-    "appraiserEmail": {"subject": string, "body": string} | null,
-    "internalEmail": {"subject": string, "body": string}
-  }
+  "flags": [string]                  // up to 6 short internal warnings for the loan officer
 }
 
 How to fill it in:
@@ -63,12 +55,7 @@ How to fill it in:
 - "receiver": "processor" by default. Use "lo" for items that need a borrower decision, a structure or pricing change, an exception, or a delicate conversation.
 - "timing" from the approval's grouping: prior to docs -> prior_to_docs; prior to funding / prior to closing -> prior_to_funding; signed at the closing table -> at_closing; after closing -> post_closing; anything else -> other.
 - "restructureRequired": true only if the approval changes the terms that were requested (for example a lower maximum LTV or loan amount, a different program, a counter-offer, a required paydown). Put the details in "restructureNotes" in one or two plain sentences; otherwise "".${confirmed ? `\n- The borrower confirmed these requested terms: loan amount ${confirmed.loanAmount ?? 'unknown'}, LTV ${confirmed.ltv ?? 'unknown'}%, rate ${confirmed.rate ?? 'unknown'}%, program "${confirmed.program || ''}". Note any difference in restructureNotes.` : ''}
-- "flags": things the loan officer should know: expirations that are close (especially the rate lock), typos in names or vesting, a DSCR close to the minimum, items that could change cash to close, conditions that conflict. Short sentences.
-- Drafts are plain text (no markdown), ready to copy and paste, signed "${loName || 'Your loan team'}". Only list open items.
-  * borrowerEmail: friendly, says the loan is approved with conditions, lists only the borrower's open items in plain English with the "why" where it helps, grouped as "Needed now" and "At closing". ${lang === 'he' ? 'Write the borrower email and text in Hebrew.' : ''}
-  * borrowerText: under 300 characters, points them to the email.
-  * insuranceEmail / titleEmail / appraiserEmail: professional, list every requirement for that party exactly as the approval states it, include the property address and loan number, use placeholders like [Agent Name] and [Title Officer] for unknown names, and ask them to send items to ${processorName || 'our processor'}. Use null if that party has no open items.
-  * internalEmail: a short status note to the processor${processorName ? ` (${processorName})` : ''} listing open lender-side items, the critical path and the flags.`;
+- "flags": things the loan officer should know: expirations that are close (especially the rate lock), typos in names or vesting, a DSCR close to the minimum, items that could change cash to close, conditions that conflict. Short sentences.`;
 }
 
 export async function readApproval(text, opts) {
@@ -116,6 +103,8 @@ export function normalizeApproval(data, previous) {
       // keep the team's edits and progress unless the new approval now marks it cleared
       for (const k of ['plain', 'why', 'plainHe', 'whyHe', 'provider', 'receiver', 'timing', 'borrowerVisible']) if (prev.edited?.[k]) { base[k] = prev[k]; base.edited = { ...(base.edited || {}), [k]: true }; }
       if (base.status !== 'cleared') base.status = prev.status;
+      // documents already uploaded for this condition stay with it
+      if (prev.uploads?.length) base.uploads = prev.uploads;
     }
     return base;
   });

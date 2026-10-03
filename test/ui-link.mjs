@@ -1,0 +1,35 @@
+// Borrower link + "Resend link" shows at every stage after sending; any team member can resend (MOCK_AI, MOCK_SMS).
+import { chromium } from '/home/claude/.npm-global/lib/node_modules/@playwright/mcp/node_modules/playwright/index.mjs';
+import fs from 'node:fs';
+const B = 'http://localhost:8890';
+const call = async (method, p, body, c = '') => { const r = await fetch(B + p, { method, headers: { 'content-type': 'application/json', cookie: c }, body: body ? JSON.stringify(body) : undefined }); return { s: r.status, d: await r.json().catch(() => ({})), sc: r.headers.get('set-cookie') }; };
+const ok = (c, m) => console.log(c ? 'PASS' : 'FAIL', m);
+const lo = (await call('POST', '/api/login', { role: 'approver', name: 'Lior', password: 'lo' })).sc.split(';')[0];
+const team = (await call('POST', '/api/login', { role: 'team', name: 'Dana', password: 'team' })).sc.split(';')[0];
+const { d: { id } } = await call('POST', '/api/loans', { worksheet: JSON.parse(fs.readFileSync('test/purch.json')), inputs: { borrowerName: 'Sample Borrower', borrowerEmail: 'b@example.com', borrowerPhone: '8185550101', smsConsent: true } }, lo);
+ok((await call('POST', `/api/loans/${id}/resend`, null, team)).s === 409, 'no resend before anything was sent');
+const url = (await call('POST', `/api/loans/${id}/send`, null, lo)).d.url; const t = url.split('/r/')[1];
+const b = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium' });
+const p = await (await b.newContext({ viewport: { width: 1300, height: 900 } })).newPage();
+const errs = []; p.on('pageerror', (e) => errs.push(e.message));
+await p.goto(B); await p.fill('input[name=name]', 'Dana'); await p.check('input[value=team]'); await p.fill('input[name=password]', 'team'); await p.click('button[type=submit]');
+await p.waitForSelector('table.dash');
+const check = async (label) => {
+  await p.goto(`${B}/#/loan/${id}`); await p.reload(); await p.waitForSelector('#blink');
+  ok(await p.inputValue('#blink') === url, `${label}: link shown`);
+  const before = (await call('GET', `/api/loans/${id}`, null, lo)).d.loan.notifications.length;
+  await p.click('button[data-do=resend]'); await p.waitForTimeout(800);
+  const n = (await call('GET', `/api/loans/${id}`, null, lo)).d.loan.notifications;
+  ok(n.length >= before + 2 && n.slice(-2).some((x) => x.channel === 'sms'), `${label}: team member resent (email + text logged)`);
+  return n;
+};
+await check('sent');
+await call('POST', '/api/b/respond', { t, action: 'confirm', choices: {} });
+const n = await check('confirmed');
+ok(n.at(-1).type === 'borrower_link' || n.at(-2).type === 'borrower_link', 'after confirming, resend uses the "here is your link again" message');
+await call('POST', `/api/loans/${id}/uw`, { result: 'approved', approvedLtv: 75, approvedRate: 7.625, notify: true }, lo);
+let st = (await call('GET', `/api/loans/${id}`, null, lo)).d.loan.status; await check(st);
+await call('POST', `/api/loans/${id}/lock`, { rate: 7.75, expires: '2026-11-15', payment: 1695.65, conditions: 'Bank statements', notify: true }, lo);
+st = (await call('GET', `/api/loans/${id}`, null, lo)).d.loan.status; await check(st);
+ok(!errs.length, 'no page errors ' + errs.join(';'));
+await b.close();

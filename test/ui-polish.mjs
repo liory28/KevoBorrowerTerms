@@ -28,5 +28,16 @@ ok(await ta.inputValue() === 'These are the initial terms', 'Undo steps all the 
 ok(await undo.isHidden(), 'Undo hides when nothing is left');
 await ta.fill('אלה התנאים'); ok(await lang.textContent() === 'To English', 'typing Hebrew switches the button to "To English"');
 ok(await ta.getAttribute('dir') === 'auto', 'Hebrew displays right-to-left');
+await ta.fill('You are approved'); 
+await bar.locator('.tone').selectOption('excited'); await p.waitForFunction(() => document.querySelector('textarea[name=noteToBorrower]').value.startsWith('[excited]'));
+ok(true, 'Tone → Excited rewrites the message');
+ok(await bar.locator('.tone').inputValue() === '', 'tone menu resets after use');
+await bar.locator('.ask').click(); const askIn = bar.locator('.polish-ask input'); ok(await askIn.isVisible(), 'Ask AI… opens a request box');
+await askIn.fill('mention the appraisal is Tuesday'); await askIn.press('Enter');
+await p.waitForFunction(() => document.querySelector('textarea[name=noteToBorrower]').value.startsWith('[custom: mention the appraisal is Tuesday]'));
+ok(await askIn.inputValue() === '', 'custom request runs on Enter and clears');
+ok(await undo.textContent() === 'Undo (2)', 'tone and custom rewrites can be undone');
+ok(p.url().includes('/loan/'), 'still on the loan page (no form submit)');
+const shot = await bar.screenshot({ path: '/tmp/claude-0/-home-claude/2ca42659-9b7c-57c6-a217-6c57d80cf100/scratchpad/polishbar.png' });
 ok(!errs.length, 'no page errors ' + errs.join(';'));
 await b.close();

@@ -63,14 +63,15 @@ Every step is in the loan's **Activity** log, every email attempt (and failure) 
 | `TEAM_NOTIFY_EMAILS` | Optional. Defaults to `teamlior@ameritrust-mortgage.com` |
 | `APPROVER_NOTIFY_EMAILS` | Optional. Defaults to `lior@liorfinance.com` |
 | `OPENAI_API_KEY` **or** `ANTHROPIC_API_KEY` | Turns on the AI: the borrower assistant, **reading approvals** (required for that feature), and **Polish with AI**. If both are set, Claude is used. |
-| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` | Texting (from twilio.com). Optional until you're ready. |
+| `QUO_API_KEY`, `QUO_FROM` | Texting through Quo (formerly OpenPhone): an API key from Quo and the Quo number to send from, like `+18185550000`. Optional `QUO_USER_ID`. Used instead of Twilio when set. |
+| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` | Texting through Twilio instead (from twilio.com). Optional. |
 | `TWILIO_MESSAGING_SERVICE_SID` (recommended) or `TWILIO_FROM` | The Twilio Messaging Service (needed for A2P 10DLC registration) or a Twilio phone number like `+18185550000`. |
 
 4. **Deploys → Trigger deploy** so the variables take effect.
 5. **Email (Resend)**: add your domain in Resend, add the DNS records it gives you in GoDaddy (they're for a sending subdomain; don't touch your Google Workspace MX records), then set `FROM_EMAIL` to an address on it. Until this is done everything still works: the portal shows the borrower link to copy, and logs "email not sent".
 6. **Domain**: when you're ready to replace the old portal, point `terms.liorfinance.com` at this site (Domain management → add the domain; CNAME in GoDaddy). Data from the old portal isn't touched; this uses its own storage.
 7. Set a monthly spending limit on the OpenAI/Anthropic account. Approvals contain borrower information: use an AI account set to keep no data (OpenAI API data isn't used for training by default; this app also sends `store: false`), and add the provider to your vendor list.
-8. **Texting (Twilio)**: create a Twilio account, buy a local number, then complete **A2P 10DLC registration** (Brand + Campaign, "Customer care / account notifications"). US carriers block unregistered business texts; approval usually takes 1–3 weeks. Then add the Twilio variables above and redeploy. Only text borrowers who agreed to it.
+8. **Texting (Quo)**: in Quo, make sure the number's US carrier registration (A2P 10DLC) is approved, add prepaid API credit, create an API key, then set `QUO_API_KEY` and `QUO_FROM` and redeploy. Texts and replies appear in that number's Quo inbox. **Or Twilio**: create a Twilio account, buy a local number, then complete **A2P 10DLC registration** (Brand + Campaign, "Customer care / account notifications"). US carriers block unregistered business texts; approval usually takes 1–3 weeks. Then add the Twilio variables above and redeploy. Only text borrowers who agreed to it.
 
 ## Notes and limits (v1)
 - The worksheet reader is built for the Ameritrust Initial Fees Worksheet layout. If a PDF can't be read, the team sees exactly which lines failed; other document formats aren't supported yet.
@@ -83,3 +84,12 @@ Every step is in the loan's **Activity** log, every email attempt (and failure) 
 
 ## Testing locally
 `npm install`, then `EXTRA_ENV='{"MOCK_AI":"1","MOCK_SMS":"1"}' node test/server.mjs` (runs the site at http://localhost:8890 with in-memory storage; team password `team`, LO password `lo`). With the server running, `node test/api-flow.mjs` and `node test/approval-flow.mjs` run the end-to-end checks (`test/approval-sample.txt` is a made-up approval). Put sample worksheet JSON in `test/` first. Real client worksheets are deliberately not included.
+
+
+## Borrower document uploads
+
+Once the rate is locked, each item on the borrower's page has an **Upload document** button (phone photo or PDF, up to 5 MB; large photos are shrunk in the browser). The item flips to *Received*, an AI first check runs in the background (`upload-check-background`), and whoever receives that condition (processor or LO) is emailed the verdict. The borrower sees the AI's note (for example "pages 3 and 4 look missing") with a reminder that a team member reviews every document.
+
+On the loan page each condition lists its files with the AI summary. **Accept**, or **Send back** with a reason (the borrower is emailed and, if they agreed, texted the reason with their link). The team can also add a file on the borrower's behalf.
+
+Files are stored privately in Netlify Blobs and only served to the logged-in team. **Mark loan closed** (LO login, locked loans) deletes every uploaded file; the record of what was uploaded stays in the activity log. Files are sent to the AI provider you configured for the check (OpenAI with `store: false`, or Anthropic / Netlify AI Gateway).

@@ -23,8 +23,9 @@ try {
   const ltv = await p.inputValue('#uw-form input[name=approvedLtv]');
   console.log('UW form filled from approval: LTV', ltv);
   // polish a draft
+  await p.fill('.draft[data-draft=titleEmail] textarea[name=note]', 'Please send the items.');
   await p.click('.draft[data-draft=titleEmail] .pb.main'); await p.waitForSelector('.draft[data-draft=titleEmail] .undo:not([hidden])');
-  console.log('polished:', (await p.inputValue('.draft[data-draft=titleEmail] textarea')).slice(0, 40));
+  console.log('polished:', (await p.inputValue('.draft[data-draft=titleEmail] textarea[name=note]')).slice(0, 40));
   await p.selectOption('.cond >> nth=0 >> .cstatus', 'received'); await p.waitForTimeout(500);
   await p.locator('#approval-card').screenshot({ path: 'test/ui-approval-panel.png' });
   // approve + lock with notify, then the borrower checklist

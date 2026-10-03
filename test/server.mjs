@@ -28,6 +28,7 @@ Object.assign(process.env, {
 const { default: api } = await import('../netlify/functions/api.mjs');
 const { default: approvalBg } = await import('../netlify/functions/approval-background.mjs');
 const { default: jobsBg } = await import('../netlify/functions/jobs-background.mjs');
+const { default: uploadBg } = await import('../netlify/functions/upload-check-background.mjs');
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../public');
 const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml' };
 
@@ -39,6 +40,12 @@ http.createServer(async (req, res) => {
     setTimeout(() => jobsBg(new Request('http://localhost/bg', { method: 'POST', body: Buffer.concat(chunks) })), 300);
     return;
   }
+  if (url.pathname === '/.netlify/functions/upload-check-background') {
+    const chunks = []; for await (const c of req) chunks.push(c);
+    res.writeHead(202); res.end();
+    setTimeout(() => uploadBg(new Request('http://localhost/bg', { method: 'POST', body: Buffer.concat(chunks) })), 300);
+    return;
+  }
   if (url.pathname === '/.netlify/functions/approval-background') {
     // Like Netlify: answer 202 right away, keep working in the background.
     const chunks = []; for await (const c of req) chunks.push(c);
@@ -46,6 +53,7 @@ http.createServer(async (req, res) => {
     setTimeout(() => approvalBg(new Request('http://localhost/bg', { method: 'POST', body: Buffer.concat(chunks) })), 300);
     return;
   }
+  if (url.pathname === '/__outbox') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(globalThis.__OUTBOX__ || [])); return; } // test-only: messages "sent" in mock mode
   if (url.pathname.startsWith('/api/')) {
     const chunks = []; for await (const c of req) chunks.push(c);
     const body = chunks.length ? Buffer.concat(chunks) : undefined;

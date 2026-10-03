@@ -16,6 +16,7 @@ export async function sendEmail(loan, { type, to, subject, html, replyTo, cc }) 
   const recipients = (Array.isArray(to) ? to : [to]).filter(Boolean);
   const entry = { channel: 'email', type, to: recipients, cc: cc || [], subject, at: new Date().toISOString(), sent: false, error: null };
   try {
+    if (process.env.MOCK_EMAIL) { globalThis.__OUTBOX__ = [...(globalThis.__OUTBOX__ || []), { channel: 'email', to: recipients, subject, html }]; entry.sent = true; entry.id = 'mock'; return entry; }
     if (!process.env.RESEND_API_KEY || !process.env.FROM_EMAIL) throw new Error('Email is not set up (RESEND_API_KEY / FROM_EMAIL).');
     if (!recipients.length) throw new Error('No recipient.');
     const r = await fetch('https://api.resend.com/emails', {
@@ -48,6 +49,7 @@ const B = {
     requestV2: { s: 'Updated: please review your loan request', h: (n) => `<p>Hi ${n},</p><p>We've updated the loan we're requesting for you. Please review the new version and confirm it. Your earlier link no longer works.</p>`, b: 'Review my updated request' },
     reminder: { s: 'Reminder: please review your loan request', h: (n) => `<p>Hi ${n},</p><p>A quick reminder to review and confirm the loan we're requesting for you. Nothing has changed.</p>`, b: 'Review my loan request' },
     copy: { s: 'Your confirmed loan request (copy for your records)' },
+    link: { s: 'The link to your loan page', h: (n) => `<p>Hi ${n},</p><p>Here's the link to your loan page again. It always shows the latest status of your loan and anything we need from you.</p>`, b: 'Open my loan page' },
     approved: { s: 'Good news: your loan was approved as requested', h: (n) => `<p>Hi ${n},</p><p>Underwriting approved your loan the way we structured it. We're locking your rate now. See the details here:</p>`, b: 'See my approval' },
     restructure: { s: "Underwriting asked for a change. Let's talk before we lock", h: (n) => `<p>Hi ${n},</p><p>Underwriting reviewed your loan and asked for a change. Before we lock anything, let's go over what changed, why, and your options.</p>`, b: 'See what changed and schedule a call' },
     declined: { s: "Update on your loan: let's talk", h: (n) => `<p>Hi ${n},</p><p>Underwriting came back on your loan and we need to talk about your options before going further.</p>`, b: 'See the update and schedule a call' },
@@ -59,6 +61,7 @@ const B = {
     requestV2: { s: 'עדכון: נא לעבור על בקשת ההלוואה המעודכנת', h: (n) => `<div dir="rtl"><p>שלום ${n},</p><p>עדכנו את ההלוואה שאנחנו מבקשים עבורך. נא לעבור על הגרסה החדשה ולאשר אותה. הקישור הקודם כבר לא פעיל.</p></div>`, b: 'צפייה בבקשה המעודכנת' },
     reminder: { s: 'תזכורת: נא לעבור על בקשת ההלוואה', h: (n) => `<div dir="rtl"><p>שלום ${n},</p><p>תזכורת קצרה לעבור על ההלוואה שאנחנו מבקשים עבורך ולאשר אותה. שום דבר לא השתנה.</p></div>`, b: 'צפייה בבקשת ההלוואה' },
     copy: { s: 'בקשת ההלוואה שאישרת (עותק לתיעוד)' },
+    link: { s: 'הקישור לעמוד ההלוואה שלך', h: (n) => `<div dir="rtl"><p>שלום ${n},</p><p>הנה שוב הקישור לעמוד ההלוואה שלך. הוא תמיד מציג את המצב העדכני של ההלוואה ומה אנחנו צריכים ממך.</p></div>`, b: 'פתיחת עמוד ההלוואה' },
     approved: { s: 'חדשות טובות: ההלוואה אושרה כפי שביקשנו', h: (n) => `<div dir="rtl"><p>שלום ${n},</p><p>החיתום אישר את ההלוואה כפי שבנינו אותה. אנחנו נועלים את הריבית עכשיו. הפרטים כאן:</p></div>`, b: 'צפייה באישור' },
     restructure: { s: 'החיתום ביקש שינוי. בוא נדבר לפני הנעילה', h: (n) => `<div dir="rtl"><p>שלום ${n},</p><p>החיתום בדק את ההלוואה וביקש שינוי. לפני שננעל משהו, בוא נעבור יחד על מה השתנה, למה, ומה האפשרויות.</p></div>`, b: 'מה השתנה וקביעת שיחה' },
     declined: { s: 'עדכון על ההלוואה שלך: בוא נדבר', h: (n) => `<div dir="rtl"><p>שלום ${n},</p><p>החיתום החזיר תשובה על ההלוואה, ואנחנו צריכים לדבר על האפשרויות לפני שממשיכים.</p></div>`, b: 'צפייה בעדכון וקביעת שיחה' },
@@ -77,5 +80,5 @@ export const copySubject = (lang) => (B[lang] || B.en).copy.s;
 // Turns a plain-text message the team wrote into a simple, safe HTML email.
 export function textToHtml(text) {
   const rtl = /[\u0590-\u05FF]/.test(text);
-  return `<div${rtl ? ' dir="rtl"' : ''} style="font-size:15px;line-height:1.55">${esc(text).replace(/\n/g, '<br>')}</div>`;
+  return `<div${rtl ? ' dir="rtl"' : ''} style="font-size:15px;line-height:1.55">${esc(text).replace(/https?:\/\/[^\s<]+/g, (u) => `<a href="${u}" style="color:#2C5C4C;font-weight:bold">${u}</a>`).replace(/\n/g, '<br>')}</div>`;
 }

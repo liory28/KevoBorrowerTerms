@@ -23,8 +23,55 @@ const DRAFT_META = {
 };
 const sel = (name, map, val) => `<select name="${name}">${Object.entries(map).map(([k, l]) => `<option value="${k}" ${k === val ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
 
+function ctextHtml(c, L) {
+  return `<div>${esc(c.plain)}${c.isNew ? ' <span class="st alert">New</span>' : ''}</div>${c.why ? `<div class="cwhy">Why: ${esc(c.why)}</div>` : ''}
+    <div class="cmeta"><span class="st">${esc(PROVIDER_LABEL[c.provider] || '')}</span><span class="st">${TIMING_LABEL[c.timing]}</span><span class="st">${RECEIVER_LABEL[c.receiver]} receives</span>${c.borrowerVisible ? '<span class="st good">Borrower sees this</span>' : '<span class="st">Hidden from borrower</span>'}${L?.inputs?.language === 'he' && c.heStale ? '<span class="st alert">Hebrew may be out of date</span>' : ''}</div>`;
+}
+
+// Done = cleared, or received with nothing left to review.
+const condDone = (c) => c.status === 'cleared' || (c.status === 'received' && !(c.uploads || []).some((u) => !u.review && !u.deletedAt));
+
+// Files uploaded for a condition, with the AI's first check and the team's review.
+const VERDICT = { looks_good: ['AI: looks good', 'good'], needs_attention: ['AI: possible issue', 'alert'], cant_tell: ['AI: couldn’t tell', ''] };
+function uploadsHtml(c, L) {
+  const ups = c.uploads || [];
+  const closed = L.status === 'closed';
+  const list = ups.map((u) => {
+    const ai = u.ai || {};
+    const chip = ai.state === 'pending' ? '<span class="st wait">AI checking…</span>' : ai.state === 'failed' ? `<span class="st">AI check failed</span> <button class="btn link" data-urecheck="${u.id}" style="min-height:0;padding:0;font-size:12px">Try again</button>` : ai.state === 'off' ? '<span class="st">No AI check</span>' : `<span class="st ${VERDICT[ai.verdict]?.[1] || ''}">${VERDICT[ai.verdict]?.[0] || 'AI'}</span>`;
+    const rv = u.review ? `<span class="st ${u.review.decision === 'accepted' ? 'good' : 'alert'}">${u.review.decision === 'accepted' ? 'Accepted' : 'Sent back'} by ${esc(u.review.by)}</span>` : '<span class="st alert">Needs review</span>';
+    return `<div class="upl" data-uid="${u.id}">
+      <div class="upl-top">${u.deletedAt ? `<span>📄 ${esc(u.name)} <span class="small" style="padding:0">(deleted at closing)</span></span>` : `<a href="/api/loans/${L.id}/uploads/${u.id}" target="_blank" rel="noopener">📄 ${esc(u.name)}</a>`}<span class="small" style="padding:0">${esc(when(u.at))} · ${u.byRole === 'borrower' ? 'borrower' : esc(u.by)}</span>${chip}${rv}</div>
+      ${ai.state === 'done' && (ai.summary || (ai.issues || []).length) ? `<div class="upl-ai">${esc(ai.summary || '')}${(ai.issues || []).length ? `<ul>${ai.issues.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}</div>` : ''}
+      ${u.review?.decision === 'returned' && u.review.reason ? `<div class="small" style="padding:2px 0 0">Told the borrower: “${esc(u.review.reason)}”</div>` : ''}
+      ${!u.review && !closed && !u.deletedAt ? `<div class="row-actions" style="margin-top:6px"><button class="btn secondary" data-uaccept="${u.id}" style="min-height:34px;font-size:13px">Accept</button><button class="btn link" data-ureturnopen="${u.id}" style="min-height:34px;font-size:13px">Send back…</button></div>
+        <div class="upl-return" hidden><label class="field">What does the borrower need to fix? (sent to them with their link)<textarea rows="2" data-polish="borrower" placeholder="e.g. Page 3 of the statement is missing. Please upload all pages.">${esc(ai.state === 'done' && ai.verdict === 'needs_attention' ? ai.borrowerMessage || '' : '')}</textarea></label><div class="row-actions"><button class="btn primary" data-ureturn="${u.id}" style="min-height:34px;font-size:13px">Send back to borrower</button></div></div>` : ''}
+    </div>`;
+  }).join('');
+  const canAdd = !closed && c.status !== 'cleared';
+  return `<div class="uploads">${list}${canAdd ? `<label class="btn link upl-add" style="min-height:0;padding:4px 0;font-size:13px;cursor:pointer"><input type="file" accept="application/pdf,image/*" data-uadd="${c.id}" hidden>+ Upload a file for this item</label>` : ''}</div>`;
+}
+
+// Request cards: the item list is built from the live checklist (edit a condition to change it);
+// the team adds a personal note and can change the subject and recipient.
+function draftCard(k, d, D) {
+  const inputs = D.loan.inputs || {}, m = DRAFT_META[k];
+  const to = d.to || (m.toKey ? inputs[m.toKey] || '' : '');
+  return `<div class="draft" data-draft="${k}"><div class="dhead"><strong>${esc(m.label)}</strong> <span class="st good">Items update with the checklist</span></div>
+      ${m.sms ? `<div class="small" style="padding:0">To: ${esc(inputs.borrowerPhone || 'no phone on file')}${inputs.smsConsent ? '' : ' · borrower has not agreed to texts'}</div>` : `<div class="grid-f" style="grid-template-columns:minmax(0,1fr) minmax(0,1.4fr)"><label class="field">To<input name="to" value="${esc(to)}" placeholder="email address"></label><label class="field">Subject<input name="subject" value="${esc(d.subject)}" placeholder="${esc(d.defaultSubject)}"></label></div>`}
+      <label class="field">Your note (optional, added at the top)<textarea name="note" rows="2" data-polish="${m.audience}" placeholder="${m.audience === 'borrower' ? 'e.g. Congrats again on the approval! Just a few items left.' : 'e.g. Please send by Friday so we can stay on schedule.'}">${esc(d.note)}</textarea></label>
+      <div class="dprev-label small">What will be sent</div>
+      <div class="dpreview" ${/[\u0590-\u05FF]/.test(d.body) ? 'dir="rtl"' : ''}>${esc(d.body)}</div>
+      <div class="row-actions"><button class="btn secondary" data-copy="${k}" style="min-height:40px;font-size:13px">Copy</button>${m.sms ? `<button class="btn primary" data-sendsms="${k}" style="min-height:40px;font-size:13px" ${D.smsEnabled && inputs.smsConsent ? '' : 'disabled'}>Send text</button>` : `<button class="btn primary" data-sendmail="${k}" style="min-height:40px;font-size:13px" ${D.emailEnabled ? '' : 'disabled'}>Send email</button>`}<span class="dmsg small" style="padding:0"></span></div></div>`;
+}
+function draftsHtml(drafts, D) {
+  const keys = Object.keys(drafts || {}).filter((k) => DRAFT_META[k]);
+  if (!keys.length) return '<p class="small" style="padding:0">Nothing open that needs a request right now.</p>';
+  return keys.map((k) => draftCard(k, drafts[k], D)).join('');
+}
+
 export function showApprovalPanel(status) {
-  return ['confirmed', 'uw_approved', 'uw_restructure', 'uw_declined', 'locked'].includes(status);
+  return ['confirmed', 'uw_approved', 'uw_restructure', 'uw_declined', 'locked', 'closed'].includes(status);
 }
 
 export function renderApproval(D) {
@@ -52,14 +99,14 @@ export function renderApproval(D) {
     const conds = A.conditions || [];
     const done = conds.filter((c) => ['received', 'cleared'].includes(c.status)).length;
     const groups = Object.keys(PROVIDER_LABEL).map((p) => [p, conds.filter((c) => c.provider === p)]).filter(([, xs]) => xs.length);
-    const row = (c) => `<div class="cond ${['received', 'cleared'].includes(c.status) ? 'cond-done' : ''}" data-cid="${c.id}">
+    const row = (c) => `<div class="cond ${condDone(c) ? 'cond-done' : ''}" data-cid="${c.id}">
         <div class="cond-top">
           <span class="cnum">#${esc(c.num)}</span>
-          <div class="ctext"><div>${esc(c.plain)}${c.isNew ? ' <span class="st alert">New</span>' : ''}</div>${c.why ? `<div class="cwhy">Why: ${esc(c.why)}</div>` : ''}
-            <div class="cmeta"><span class="st">${TIMING_LABEL[c.timing]}</span><span class="st">${RECEIVER_LABEL[c.receiver]} receives</span>${c.borrowerVisible ? '<span class="st good">Borrower sees this</span>' : ''}</div></div>
+          <div class="ctext">${ctextHtml(c, L)}</div>
           <label class="sr-only" for="st-${c.id}">Status for #${esc(c.num)}</label>
           <select id="st-${c.id}" class="cstatus" data-cid="${c.id}">${Object.entries(STATUS_LABEL).map(([k, l]) => `<option value="${k}" ${k === c.status ? 'selected' : ''}>${l}</option>`).join('')}</select>
         </div>
+        ${uploadsHtml(c, L)}
         <details class="cedit"><summary>Edit · original wording</summary>
           <div class="small" style="padding:6px 0">Approval says: “${esc(c.original)}”</div>
           <label class="field">What's needed (plain English)<textarea name="plain" rows="2" data-polish="borrower">${esc(c.plain)}</textarea></label>
@@ -68,15 +115,6 @@ export function renderApproval(D) {
           <div class="grid-f" style="grid-template-columns:repeat(3,minmax(0,1fr))"><label class="field">Provided by${sel('provider', PROVIDER_LABEL, c.provider)}</label><label class="field">Received by${sel('receiver', RECEIVER_LABEL, c.receiver)}</label><label class="field">When${sel('timing', TIMING_LABEL, c.timing)}</label></div>
           <label class="field check"><input type="checkbox" name="borrowerVisible" ${c.borrowerVisible ? 'checked' : ''}> Show on the borrower's checklist</label>
         </details></div>`;
-    const inputs = L.inputs || {};
-    const draftCard = (k, d) => {
-      const m = DRAFT_META[k]; if (!m) return '';
-      const to = d.to || (m.toKey ? inputs[m.toKey] || '' : '');
-      return `<div class="draft" data-draft="${k}"><div class="dhead"><strong>${esc(m.label)}</strong></div>
-        ${m.sms ? `<div class="small" style="padding:0 0 6px">To: ${esc(inputs.borrowerPhone || 'no phone on file')}${inputs.smsConsent ? '' : ' · borrower has not agreed to texts'}</div>` : `<label class="field">To<input name="to" value="${esc(to)}" placeholder="email address"></label><label class="field">Subject<input name="subject" value="${esc(d.subject)}"></label>`}
-        <label class="field">Message<textarea name="body" rows="${m.sms ? 3 : 9}" data-polish="${m.audience}">${esc(d.body)}</textarea></label>
-        <div class="row-actions"><button class="btn secondary" data-copy="${k}" style="min-height:40px;font-size:13px">Copy</button>${m.sms ? `<button class="btn primary" data-sendsms="${k}" style="min-height:40px;font-size:13px" ${D.smsEnabled && inputs.smsConsent ? '' : 'disabled'}>Send text</button>` : `<button class="btn primary" data-sendmail="${k}" style="min-height:40px;font-size:13px" ${D.emailEnabled ? '' : 'disabled'}>Send email</button>`}<span class="dmsg small" style="padding:0"></span></div></div>`;
-    };
     body = `<div class="small" style="padding:0 0 10px">${A.file ? `<a href="/api/loans/${L.id}/approval-file" target="_blank" rel="noopener">${esc(A.file.name)}</a> · ` : ''}uploaded ${esc(when(A.uploadedAt))} by ${esc(A.uploadedBy)} · read by ${esc(A.provider || 'AI')}${A.n > 1 ? ` · upload #${A.n}` : ''}</div>
       <div class="facts">${facts.map(([k, v]) => `<div><div class="fk">${k}</div><div class="fv">${esc(v)}</div></div>`).join('')}</div>
       <div style="margin-top:14px"><div class="kv" style="border-top:none;font-size:12px;font-weight:600;color:var(--muted)"><div>Compared with what the borrower confirmed</div><div>Confirmed</div><div>Approval</div></div>
@@ -85,16 +123,17 @@ export function renderApproval(D) {
       ${['confirmed', 'uw_approved', 'uw_restructure', 'uw_declined'].includes(D.loan.status) ? '<div class="row-actions" style="margin-top:10px"><button class="btn secondary" data-ap="use-facts" style="min-height:40px;font-size:13px">Fill the underwriting result from this approval</button></div>' : ''}
       ${(A.flags || []).length ? `<div class="flags" style="margin-top:14px"><strong>Heads up</strong>${A.flags.map((x) => `<div>• ${esc(x)}</div>`).join('')}</div>` : ''}
       ${(A.removedSincePrevious || []).length ? `<div class="small" style="padding:8px 0 0">No longer on the approval: #${A.removedSincePrevious.map(esc).join(', #')}</div>` : ''}
-      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-top:18px;gap:12px;flex-wrap:wrap"><h3 style="margin:0">Conditions (${done} of ${conds.length} received or cleared)</h3><span class="small" style="padding:0">Status changes save right away.</span></div>
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-top:18px;gap:12px;flex-wrap:wrap"><h3 style="margin:0">Conditions (${done} of ${conds.length} received or cleared)</h3><span class="small" style="padding:0">Every change saves automatically and updates the borrower’s page and the requests below.</span></div>
       ${groups.map(([p, xs]) => `<div class="cgroup"><div class="cgh">${PROVIDER_LABEL[p]} <span class="small" style="padding:0">${xs.filter((c) => !['received', 'cleared'].includes(c.status)).length} open</span></div>${xs.map(row).join('')}</div>`).join('')}
-      <h3 style="margin:22px 0 8px">Requests ready to send</h3><p class="small" style="padding:0 0 8px">Review, polish if you like, then copy or send. Emails to outside parties copy the processor and you.</p>
-      ${Object.entries(A.drafts || {}).map(([k, d]) => draftCard(k, d)).join('')}
-      <div class="row-actions" style="margin-top:16px"><button class="btn primary" data-ap="save">Save checklist &amp; drafts</button>${D.loan.status === 'locked' ? '<button class="btn secondary" data-ap="notify">Notify borrower: checklist updated</button>' : ''}<span id="ap-msg" class="small" style="padding:0"></span></div>
+      <h3 style="margin:22px 0 8px">Requests ready to send</h3><p class="small" style="padding:0 0 8px">Built from the open conditions above. To change an item, edit the condition and every request (and the borrower’s page) updates. Add a note on top if you like. Borrower messages always include the link to their loan page. Emails to outside parties copy the processor and you.</p>
+      <div id="ap-drafts">${draftsHtml(D.approvalDrafts, D)}</div>
+      <div class="row-actions" style="margin-top:16px">${D.loan.status === 'locked' ? '<button class="btn secondary" data-ap="notify">Notify borrower: checklist updated</button>' : ''}<span id="ap-msg" class="small" style="padding:0">Changes save automatically.</span></div>
       <details style="margin-top:16px"><summary class="small" style="padding:0;cursor:pointer">Upload a newer approval (keeps progress on matching conditions)</summary><div style="margin-top:10px">${drop('Upload the updated approval')}</div></details>`;
   }
   return `<div class="tcard" id="approval-card"><h3>Underwriting approval &amp; conditions</h3>${body}</div>`;
 }
 
+const pendingTries = {};
 export function wireApproval(D, ctx) {
   const card = document.getElementById('approval-card'); if (!card) return;
   const A = D.loan.approval, id = D.loan.id;
@@ -136,50 +175,152 @@ export function wireApproval(D, ctx) {
       form.scrollIntoView({ behavior: 'smooth', block: 'center' });
       ctx.flash(true, 'Underwriting result filled from the approval. Review it, then save or notify the borrower.');
     }
-    if (a === 'save') {
-      const updates = [...card.querySelectorAll('.cond')].map((el) => {
-        const u = { id: el.dataset.cid, status: el.querySelector('.cstatus').value };
-        el.querySelectorAll('.cedit [name]').forEach((f) => { u[f.name] = f.type === 'checkbox' ? f.checked : f.value; });
-        return u;
-      });
-      const drafts = {};
-      card.querySelectorAll('.draft').forEach((el) => { drafts[el.dataset.draft] = { to: el.querySelector('[name=to]')?.value || '', subject: el.querySelector('[name=subject]')?.value || '', body: el.querySelector('[name=body]').value }; });
-      try { await ctx.api(`loans/${id}/conditions`, { method: 'POST', body: { updates, drafts } }); ctx.reload('Checklist saved.'); } catch (er) { msg(er.message, false); }
-    }
     if (a === 'notify') {
       if (!confirm('Email (and text, if allowed) the borrower that their checklist was updated?')) return;
       try { const r = await ctx.api(`loans/${id}/notify-checklist`, { method: 'POST', body: {} }); ctx.reload(r.emailed ? 'Borrower notified.' : `The borrower's page is updated, but the email was not sent (${r.emailError}).`); } catch (er) { ctx.flash(false, er.message); }
     }
   }));
-  card.querySelectorAll('.cstatus').forEach((s) => s.addEventListener('change', async () => {
-    const row = s.closest('.cond');
-    try { await ctx.api(`loans/${id}/conditions`, { method: 'POST', body: { updates: [{ id: s.dataset.cid, status: s.value }] } }); row.classList.toggle('cond-done', ['received', 'cleared'].includes(s.value)); msg(`#${row.querySelector('.cnum').textContent.slice(1)} marked ${STATUS_LABEL[s.value].toLowerCase()}.`); }
-    catch (er) { msg(er.message, false); }
-  }));
-  card.querySelectorAll('[data-copy]').forEach((b) => b.addEventListener('click', async (e) => {
+  // ---- Autosave ----
+  const draftsBox = card.querySelector('#ap-drafts');
+  const applyResult = (r) => {
+    for (const c of r.conditions || []) {
+      const row = card.querySelector(`.cond[data-cid="${c.id}"]`); if (!row) continue;
+      row.querySelector('.ctext').innerHTML = ctextHtml(c, D.loan);
+      row.classList.toggle('cond-done', condDone(c));
+      for (const k of ['plainHe', 'whyHe']) { const f = row.querySelector(`.cedit [name=${k}]`); if (f && document.activeElement !== f) f.value = c[k] || ''; }
+    }
+    if (r.drafts && draftsBox) {
+      // Update each card's preview in place; add or remove cards as items open and close.
+      // Never touch a field someone is typing in.
+      const keys = Object.keys(r.drafts).filter((k) => DRAFT_META[k]);
+      if (!keys.length) { draftsBox.innerHTML = draftsHtml({}, D); }
+      else {
+        draftsBox.querySelectorAll(':scope > p').forEach((x) => x.remove());
+        draftsBox.querySelectorAll('.draft').forEach((el) => { if (!keys.includes(el.dataset.draft) && !el.contains(document.activeElement)) el.remove(); });
+        let prev = null;
+        for (const k of keys) {
+          const d = r.drafts[k];
+          let el = draftsBox.querySelector(`.draft[data-draft="${k}"]`);
+          if (!el) {
+            const h = document.createElement('div'); h.innerHTML = draftCard(k, d, D); el = h.firstElementChild;
+            if (prev) prev.after(el); else draftsBox.prepend(el);
+            enhancePolish(el);
+          } else {
+            const pv = el.querySelector('.dpreview'); pv.textContent = d.body; pv.dir = /[\u0590-\u05FF]/.test(d.body) ? 'rtl' : 'ltr';
+          }
+          prev = el;
+        }
+      }
+    }
+  };
+  const inflight = new Set();
+  const save = (body, okText) => { const pr = doSave(body, okText); inflight.add(pr); pr.finally(() => inflight.delete(pr)); return pr; };
+  const doSave = async (body, okText) => {
+    msg('Saving…');
+    try {
+      const r = await ctx.api(`loans/${id}/conditions`, { method: 'POST', body });
+      applyResult(r);
+      if (r.translateFailed?.length) msg('Saved, but the Hebrew wording could not be updated. Edit it by hand or try again.', false);
+      else msg(okText || 'All changes saved.');
+      return r;
+    } catch (er) { msg(er.message, false); return null; }
+  };
+  const timers = new Map(), pendingFns = new Map();
+  const later = (key, fn, ms) => { clearTimeout(timers.get(key)); pendingFns.set(key, fn); timers.set(key, setTimeout(() => { pendingFns.delete(key); fn(); }, ms)); };
+  // Before copying or sending: run any edit that's still waiting to save, and wait for saves in progress.
+  const flush = async () => {
+    for (const [key, fn] of pendingFns) { clearTimeout(timers.get(key)); pendingFns.delete(key); fn(); }
+    while (inflight.size) await Promise.allSettled([...inflight]);
+  };
+  const condUpdate = (row) => {
+    const u = { id: row.dataset.cid };
+    row.querySelectorAll('.cedit [name]').forEach((f) => { u[f.name] = f.type === 'checkbox' ? f.checked : f.value; });
+    return u;
+  };
+  const draftSettings = (dr) => ({ to: dr.querySelector('[name=to]')?.value || '', subject: dr.querySelector('[name=subject]')?.value ?? '', note: dr.querySelector('[name=note]').value });
+  const draftPayload = (dr) => ({ [dr.dataset.draft]: draftSettings(dr) });
+  card.addEventListener('change', (e) => {
+    const t = e.target;
+    if (t.classList.contains('cstatus')) {
+      const row = t.closest('.cond');
+      save({ updates: [{ id: t.dataset.cid, status: t.value }] }, `#${row.querySelector('.cnum').textContent.slice(1)} marked ${STATUS_LABEL[t.value].toLowerCase()}.`);
+      return;
+    }
+    const row = t.closest('.cedit')?.closest('.cond');
+    if (row) { clearTimeout(timers.get(`c:${row.dataset.cid}`)); save({ updates: [condUpdate(row)] }); return; }
+    const dr = t.closest('.draft');
+    if (dr && t.matches('input, textarea')) { clearTimeout(timers.get(`d:${dr.dataset.draft}`)); pendingFns.delete(`d:${dr.dataset.draft}`); save({ drafts: draftPayload(dr) }); }
+  });
+  card.addEventListener('input', (e) => {
+    const t = e.target;
+    const row = t.closest('.cedit')?.closest('.cond');
+    if (row && (t.tagName === 'TEXTAREA' || (t.tagName === 'INPUT' && t.type !== 'checkbox'))) { later(`c:${row.dataset.cid}`, () => save({ updates: [condUpdate(row)] }), 900); return; }
+    const dr = t.closest('.draft');
+    if (dr) later(`d:${dr.dataset.draft}`, () => save({ drafts: draftPayload(dr) }), 700);
+  });
+
+  // ---- Request cards (delegated, so they keep working after a refresh) ----
+  card.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-copy],[data-sendmail],[data-sendsms]'); if (!b) return;
     e.preventDefault();
-    const el = b.closest('.draft'), subj = el.querySelector('[name=subject]')?.value;
-    const text = (subj ? `Subject: ${subj}\n\n` : '') + el.querySelector('[name=body]').value;
-    try { await navigator.clipboard.writeText(text); el.querySelector('.dmsg').textContent = 'Copied.'; } catch { el.querySelector('[name=body]').select(); el.querySelector('.dmsg').textContent = 'Press Ctrl/Cmd+C to copy.'; }
-  }));
-  card.querySelectorAll('[data-sendmail]').forEach((b) => b.addEventListener('click', async (e) => {
-    e.preventDefault();
-    const el = b.closest('.draft'), k = b.dataset.sendmail;
-    const to = el.querySelector('[name=to]').value.trim();
-    if (!to) { el.querySelector('.dmsg').textContent = 'Enter an email address first.'; return; }
-    if (!confirm(`Send "${el.querySelector('[name=subject]').value}" to ${to}?`)) return;
+    const el = b.closest('.draft'), dm = el.querySelector('.dmsg'), k = el.dataset.draft;
+    dm.textContent = 'Getting the latest…';
+    await flush(); // the preview now reflects every edit made so far
+    dm.textContent = '';
+    const card2 = draftsBox.querySelector(`.draft[data-draft="${k}"]`) || el;
+    if (b.dataset.copy) {
+      const subj = card2.querySelector('[name=subject]')?.value || card2.querySelector('[name=subject]')?.placeholder;
+      const text = (subj ? `Subject: ${subj}\n\n` : '') + card2.querySelector('.dpreview').textContent;
+      try { await navigator.clipboard.writeText(text); dm.textContent = 'Copied.'; } catch { dm.textContent = 'Could not copy. Select the text in the preview and copy it.'; }
+      return;
+    }
+    const st = draftSettings(card2);
+    if (b.dataset.sendmail) {
+      const to = st.to.trim();
+      if (!to) { dm.textContent = 'Enter an email address first.'; return; }
+      if (!confirm(`Send "${st.subject || card2.querySelector('[name=subject]').placeholder}" to ${to}?`)) return;
+    } else if (!confirm('Text this message to the borrower?')) return;
     b.disabled = true;
-    try { await ctx.api(`loans/${id}/message`, { method: 'POST', body: { channel: 'email', kind: k, to, subject: el.querySelector('[name=subject]').value, body: el.querySelector('[name=body]').value } }); el.querySelector('.dmsg').textContent = 'Sent.'; }
-    catch (er) { el.querySelector('.dmsg').textContent = er.message; }
+    // The server rebuilds the message from the checklist at this moment, with this note, so it can't be stale.
+    try { await ctx.api(`loans/${id}/message`, { method: 'POST', body: { channel: b.dataset.sendsms ? 'sms' : 'email', kind: k, ...st } }); dm.textContent = 'Sent.'; }
+    catch (er) { dm.textContent = er.message; }
     b.disabled = false;
-  }));
-  card.querySelectorAll('[data-sendsms]').forEach((b) => b.addEventListener('click', async (e) => {
+  });
+
+  // ---- Uploaded documents: accept / send back / re-check / add a file ----
+  card.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-uaccept],[data-ureturnopen],[data-ureturn],[data-urecheck]'); if (!b) return;
     e.preventDefault();
-    const el = b.closest('.draft');
-    if (!confirm('Text this message to the borrower?')) return;
+    const box = b.closest('.upl');
+    if (b.dataset.ureturnopen) { const r = box.querySelector('.upl-return'); r.hidden = !r.hidden; if (!r.hidden) r.querySelector('textarea').focus(); return; }
     b.disabled = true;
-    try { await ctx.api(`loans/${id}/message`, { method: 'POST', body: { channel: 'sms', kind: b.dataset.sendsms, body: el.querySelector('[name=body]').value } }); el.querySelector('.dmsg').textContent = 'Sent.'; }
-    catch (er) { el.querySelector('.dmsg').textContent = er.message; }
-    b.disabled = false;
-  }));
+    try {
+      if (b.dataset.uaccept) { await ctx.api(`loans/${id}/uploads/${b.dataset.uaccept}/review`, { method: 'POST', body: { decision: 'accept' } }); ctx.reload('Accepted.'); }
+      if (b.dataset.ureturn) {
+        const reason = box.querySelector('.upl-return textarea').value.trim();
+        if (!reason) { b.disabled = false; box.querySelector('.upl-return textarea').focus(); return; }
+        const r = await ctx.api(`loans/${id}/uploads/${b.dataset.ureturn}/review`, { method: 'POST', body: { decision: 'return', reason } });
+        ctx.reload(`Sent back. ${r.emailed ? 'The borrower was emailed' : r.emailed === false ? 'The email did not go out' : 'No email (email not set up)'}${r.texted ? ' and texted' : ''}.`);
+      }
+      if (b.dataset.urecheck) { await ctx.api(`loans/${id}/uploads/${b.dataset.urecheck}/recheck`, { method: 'POST', body: {} }); ctx.reload('Checking again…'); }
+    } catch (er) { ctx.flash(false, er.message); b.disabled = false; }
+  });
+  card.addEventListener('change', async (e) => {
+    const inp = e.target.closest('input[data-uadd]'); if (!inp || !inp.files[0]) return;
+    e.stopPropagation();
+    const f = inp.files[0];
+    if (f.size > 5 * 1024 * 1024) { ctx.flash(false, 'That file is larger than 5 MB.'); return; }
+    try {
+      const r = await fetch(`/api/loans/${id}/upload?cid=${encodeURIComponent(inp.dataset.uadd)}&name=${encodeURIComponent(f.name)}`, { method: 'POST', headers: { 'content-type': f.type || 'application/octet-stream' }, body: f });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || 'Upload failed.');
+      ctx.reload('File added. The AI check is running.');
+    } catch (er) { ctx.flash(false, er.message); }
+  }, true);
+  // While an AI check is running, refresh the page every few seconds (skipped while someone is typing).
+  const anyPending = (D.loan.approval?.conditions || []).some((c) => (c.uploads || []).some((u) => u.ai?.state === 'pending'));
+  if (anyPending) {
+    const tries = (pendingTries[id] = (pendingTries[id] || 0) + 1);
+    if (tries < 40) setTimeout(() => { const a = document.activeElement; if (!(a && /INPUT|TEXTAREA|SELECT/.test(a.tagName)) && document.body.contains(card)) ctx.reload(); }, 5000);
+  }
 }

@@ -157,6 +157,22 @@ export async function callAIJson(system, user, maxTokens = 12000) {
   throw new Error('No AI key is set (OPENAI_API_KEY or ANTHROPIC_API_KEY).');
 }
 
+// JSON call with one document attached (PDF or image), for the upload check. Runs in a background function.
+export async function callAIJsonWithFile(system, text, file) {
+  const p = pickProvider();
+  const b64 = Buffer.from(file.bytes).toString('base64');
+  const isPdf = file.mime === 'application/pdf';
+  if (p === 'claude') {
+    const doc = isPdf ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } } : { type: 'image', source: { type: 'base64', media_type: file.mime, data: b64 } };
+    return { data: extractJson(await callClaude({ system, messages: [{ role: 'user', content: [doc, { type: 'text', text }] }], maxTokens: 1500, timeoutMs: 600000 })), provider: 'claude' };
+  }
+  if (p === 'chatgpt') {
+    const doc = isPdf ? { type: 'input_file', filename: file.name || 'document.pdf', file_data: `data:application/pdf;base64,${b64}` } : { type: 'input_image', image_url: `data:${file.mime};base64,${b64}` };
+    return { data: extractJson(await callOpenAI({ system, messages: [{ role: 'user', content: [doc, { type: 'input_text', text }] }], maxTokens: 6000, json: true, effort: 'low', timeoutMs: 600000 })), provider: 'chatgpt' };
+  }
+  throw new Error('No AI key is set.');
+}
+
 // ---------- "Polish" for any message the team writes ----------
 const POLISH_MODES = {
   polish: 'Make it clear, warm and professional. Fix grammar and spelling. Keep it about the same length or shorter.',
@@ -165,19 +181,34 @@ const POLISH_MODES = {
   hebrew: 'Translate it into natural, polite Hebrew. Keep numbers, dollar amounts, dates, names, emails and links exactly as written.',
   english: 'Translate it into natural, polite English. Keep numbers, dollar amounts, dates, names, emails and links exactly as written.'
 };
-export const polishModes = Object.keys(POLISH_MODES);
+export const polishModes = [...Object.keys(POLISH_MODES), 'tone', 'custom'];
 
-export async function polishText({ text, mode = 'polish', audience = 'borrower' }) {
+// One-click tones. Each keeps every fact; only the feel changes.
+export const TONES = {
+  excited: 'Make it upbeat and celebratory: this is good news (for example, they just got approved). Warm congratulations, genuine excitement, at most one exclamation mark per paragraph. Not cheesy, no emojis unless the original has them.',
+  apologetic: 'Make it sincerely apologetic: own the delay or problem, without excuses or blaming anyone, and without admitting legal fault. Calm and respectful, then clearly state the next step.',
+  reassuring: 'Make it calm and reassuring: acknowledge any worry, explain that this is a normal part of the process, and make the next step feel simple.',
+  urgent: 'Make it politely urgent: make clear what is needed and why timing matters (for example, a rate lock or closing date already in the message), without sounding pushy or threatening. Put the request first.',
+  friendly: 'Make it warm, friendly and personal, like a trusted advisor writing to a client they know.',
+  professional: 'Make it formal and professional, suitable for a title company, insurance agent, attorney or underwriter. Concise, no small talk.',
+  bad_news: 'This delivers disappointing news (for example, terms changed or the loan was declined). Be direct and kind: say it clearly near the top, show empathy, and focus on options and the next step (usually a call).'
+};
+export const toneKeys = Object.keys(TONES);
+
+export async function polishText({ text, mode = 'polish', audience = 'borrower', tone = '', instruction = '' }) {
+  let task = POLISH_MODES[mode] || POLISH_MODES.polish;
+  if (mode === 'tone') task = `${TONES[tone] || TONES.friendly} Fix grammar and spelling too.`;
+  if (mode === 'custom') task = `Rewrite it following the team member's request below, as long as it doesn't break the strict rules. If the request asks to change a fact, number, promise or requirement, ignore that part.\n<request>${String(instruction).slice(0, 400)}</request>`;
   const who = { borrower: 'a mortgage borrower', party: 'a third party on a mortgage transaction (title company, insurance agent, appraiser, escrow)', internal: 'a teammate at the mortgage company' }[audience] || 'a mortgage borrower';
   const system = `You edit messages that a mortgage loan team sends to ${who}.
-${POLISH_MODES[mode] || POLISH_MODES.polish}
+${task}
 Strict rules:
 - Keep every fact exactly: numbers, dollar amounts, percentages, dates, names, loan numbers, addresses, emails, phone numbers and links.
 - Do not add new facts, promises, approvals, rates or deadlines. Do not remove requirements.
-- Keep placeholders like [Agent Name] as they are.${mode === 'hebrew' || mode === 'english' ? '' : '\n- Reply in the same language the message is written in (Hebrew stays Hebrew, English stays English).'}
+- Keep placeholders like [Agent Name] as they are.${mode === 'hebrew' || mode === 'english' || mode === 'custom' ? '' : '\n- Reply in the same language the message is written in (Hebrew stays Hebrew, English stays English).'}
 - Keep the same format (email stays an email, a list stays a list, a text message stays short).
 - Return only the rewritten message, with no preface or explanation.`;
-  if (process.env.MOCK_AI) return { text: mode === 'hebrew' ? `בעברית: ${text}` : mode === 'english' ? `In English: ${text.replace(/[\u0590-\u05FF:]+\s*/g, '').trim()}` : `[${mode}] ${text}`, provider: 'mock' };
+  if (process.env.MOCK_AI) return { text: mode === 'tone' ? `[${tone}] ${text}` : mode === 'custom' ? `[custom: ${instruction}] ${text}` : mode === 'hebrew' ? `בעברית: ${text}` : mode === 'english' ? `In English: ${text.replace(/[\u0590-\u05FF:]+\s*/g, '').trim()}` : `[${mode}] ${text}`, provider: 'mock' };
   const out = await askAI(system, [{ role: 'user', content: String(text).slice(0, 8000) }], 2500);
   return { text: out.answer.replace(/^"|"$/g, '').trim(), provider: out.provider };
 }

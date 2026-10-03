@@ -2,12 +2,14 @@
 import { buildTerms, scenario, fmt, r2 } from '../../public/js/calc.mjs';
 import { loans, tokens, files, newId, newToken, hashToken, getLoan, updateLoan, listLoans } from './lib/store.mjs';
 import { session, checkPassword, makeSessionCookie, clearCookie, canApprove, approverEnabled, jobKey } from './lib/auth.mjs';
-import { deliver, borrowerEmail, copySubject, teamRecipients, approverRecipients, allInternal, esc, textToHtml } from './lib/email.mjs';
-import { systemPrompt, askAI, aiConfigured, polishText, polishModes } from './lib/ai.mjs';
+import { deliver, borrowerEmail, copySubject, teamRecipients, approverRecipients, allInternal, esc, textToHtml, button } from './lib/email.mjs';
+import { systemPrompt, askAI, aiConfigured, polishText, polishModes, toneKeys } from './lib/ai.mjs';
 import { deliverSms, borrowerText, smsEnabled, normalizePhone } from './lib/sms.mjs';
 import { PROVIDERS, RECEIVERS, TIMINGS, STATUSES } from './lib/approval-ai.mjs';
 import { getAllFormats, saveFormat, resetFormat, FORMAT_KINDS } from './lib/formats.mjs';
 import { createJob, jobsStore, JOB_KINDS } from './lib/jobs.mjs';
+import { MAX_UPLOAD, MAX_PER_CONDITION, MAX_PER_LOAN, newUploadId, uploadKey, sniff, cleanName, deleteLoanUploads } from './lib/uploads.mjs';
+import { draftsView, DRAFT_KINDS } from './lib/drafts.mjs';
 
 export const config = { path: '/api/*' };
 
@@ -33,20 +35,20 @@ function computed(loan) {
 }
 
 function summary(l) {
-  return { id: l.id, borrower: l.inputs?.borrowerName || l.worksheet?.header?.borrower || '', property: l.worksheet?.header?.property || '', loanNumber: l.worksheet?.header?.loanNumber || '', status: l.status, version: l.version || 0, updatedAt: l.updatedAt, response: l.response ? { action: l.response.action, at: l.response.at } : null };
+  return { id: l.id, borrower: l.inputs?.borrowerName || l.worksheet?.header?.borrower || '', property: l.worksheet?.header?.property || '', loanNumber: l.worksheet?.header?.loanNumber || '', status: l.status, version: l.version || 0, updatedAt: l.updatedAt, response: l.response ? { action: l.response.action, at: l.response.at } : null, toReview: (l.approval?.conditions || []).flatMap((c) => c.uploads || []).filter((u) => !u.review && !u.deletedAt).length };
 }
 
 // What the borrower is allowed to see.
 function borrowerView(loan, { preview = false } = {}) {
   const v = preview ? null : (loan.versions || []).find((x) => x.v === loan.version);
   const terms = preview ? computed(loan).terms : v?.terms;
-  const stageByStatus = { sent: 'request', discuss: 'request', confirmed: 'request', uw_approved: 'approved', uw_restructure: 'restructure', uw_declined: 'restructure', locked: 'locked', draft: 'updating', ready: 'updating' };
+  const stageByStatus = { sent: 'request', discuss: 'request', confirmed: 'request', uw_approved: 'approved', uw_restructure: 'restructure', uw_declined: 'restructure', locked: 'locked', closed: 'closed', draft: 'updating', ready: 'updating' };
   const stage = preview ? 'request' : (stageByStatus[loan.status] || 'request');
-  const uw = loan.uw && ['uw_approved', 'uw_restructure', 'uw_declined', 'locked'].includes(loan.status) ? {
+  const uw = loan.uw && ['uw_approved', 'uw_restructure', 'uw_declined', 'locked', 'closed'].includes(loan.status) ? {
     result: loan.uw.result, approvedLtv: loan.uw.approvedLtv ?? null, approvedLoanAmount: loan.uw.approvedLoanAmount ?? null,
     approvedRate: loan.uw.approvedRate ?? null, reason: loan.uw.reason || '', rateAtSubmission: terms?.rate ?? null
   } : null;
-  const lock = loan.status === 'locked' && loan.lock ? { rate: loan.lock.rate, expires: loan.lock.expires, payment: loan.lock.payment, conditions: loan.lock.conditions || [], items: borrowerItems(loan) } : null;
+  const lock = ['locked', 'closed'].includes(loan.status) && loan.lock ? { rate: loan.lock.rate, expires: loan.lock.expires, payment: loan.lock.payment, conditions: loan.lock.conditions || [], items: borrowerItems(loan) } : null;
   return {
     stage, status: loan.status, version: loan.version || 0, preview,
     lang: loan.inputs?.language === 'he' ? 'he' : 'en',
@@ -56,13 +58,26 @@ function borrowerView(loan, { preview = false } = {}) {
   };
 }
 
-// The borrower's checklist: their items from the approval (plain English + why), plus any extra lines the team added at lock.
+// The borrower's checklist: their items from the approval (plain English + why, with what they've uploaded),
+// plus any extra lines the team added at lock.
+function borrowerUploadView(u) {
+  const ai = u.ai || {};
+  return {
+    id: u.id, name: u.name, at: u.at, fromTeam: u.byRole !== 'borrower', deleted: Boolean(u.deletedAt),
+    ai: ai.state === 'done' ? { state: 'done', verdict: ai.verdict, message: ai.borrowerMessage || '', messageHe: ai.borrowerMessageHe || '' } : { state: ai.state || 'off' },
+    review: u.review ? { decision: u.review.decision, reason: u.review.reason || '', reasonHe: u.review.reasonHe || '' } : null
+  };
+}
 function borrowerItems(loan) {
-  const he = loan.inputs?.language === 'he';
-  const fromApproval = loan.approval?.status === 'done' ? (loan.approval.conditions || []).filter((c) => c.borrowerVisible).map((c) => ({
-    text: c.plain, why: c.why, textHe: c.plainHe || (he ? '' : ''), whyHe: c.whyHe || '', timing: c.timing, done: ['received', 'cleared'].includes(c.status)
+  // While a newer approval is being read, keep showing the current checklist.
+  const conds = loan.approval?.status === 'done' ? loan.approval.conditions : loan.approval?.status === 'processing' ? loan.approvalPrevious?.conditions : null;
+  const fromApproval = conds ? (conds || []).filter((c) => c.borrowerVisible).map((c) => ({
+    id: c.id, text: c.plain, why: c.why, textHe: c.plainHe || '', whyHe: c.whyHe || '', timing: c.timing,
+    status: c.status, done: ['received', 'cleared'].includes(c.status), cleared: c.status === 'cleared',
+    canUpload: loan.status === 'locked' && loan.approval?.status === 'done' && c.status !== 'cleared',
+    uploads: (c.uploads || []).map(borrowerUploadView)
   })) : [];
-  const extra = (loan.lock?.conditions || []).map((t) => ({ text: t, why: '', textHe: '', whyHe: '', timing: 'other', done: false }));
+  const extra = (loan.lock?.conditions || []).map((t) => ({ text: t, why: '', textHe: '', whyHe: '', timing: 'other', done: false, uploads: [] }));
   return [...fromApproval, ...extra];
 }
 
@@ -134,7 +149,7 @@ async function loanDetail(req, s, id) {
   if (!loan) return err('Not found', 404);
   const c = computed(loan);
   const cur = (loan.versions || []).find((x) => x.v === loan.version);
-  return json({ loan, ...c, sentTerms: cur?.terms || null, scenarioNow: scenario(c.terms, {}), borrowerUrl: loan.currentToken ? borrowerUrl(req, loan.currentToken) : null, me: { ...s, canApprove: canApprove(s) }, aiEnabled: aiConfigured() || Boolean(process.env.MOCK_AI), emailEnabled: Boolean(process.env.RESEND_API_KEY && process.env.FROM_EMAIL), smsEnabled: smsEnabled() || Boolean(process.env.MOCK_SMS) });
+  return json({ loan, ...c, sentTerms: cur?.terms || null, scenarioNow: scenario(c.terms, {}), borrowerUrl: loan.currentToken ? borrowerUrl(req, loan.currentToken) : null, approvalDrafts: draftsView(loan, loan.currentToken ? borrowerUrl(req, loan.currentToken) : null), me: { ...s, canApprove: canApprove(s) }, aiEnabled: aiConfigured() || Boolean(process.env.MOCK_AI), emailEnabled: Boolean((process.env.RESEND_API_KEY && process.env.FROM_EMAIL) || process.env.MOCK_EMAIL), smsEnabled: smsEnabled() || Boolean(process.env.MOCK_SMS) });
 }
 
 async function saveInputs(req, s, id) {
@@ -211,15 +226,19 @@ async function sendToBorrower(req, s, id) {
   return json({ ok: true, url, emailed: e.sent, emailError: e.error, texted: t?.sent ?? null, textError: t?.error || null });
 }
 
+// Re-send the borrower's current link (email + text if they agreed) at any stage. Nothing changes on
+// their page; any team member can do it. Before they confirm it reads as a reminder, after that as "here's your link again".
+export const LINK_STATUSES = ['sent', 'discuss', 'confirmed', 'uw_approved', 'uw_restructure', 'uw_declined', 'locked'];
 async function resendLink(req, s, id) {
-  if (!canApprove(s)) return err('Only the loan officer login can resend.', 403);
   const loan = await getLoan(id);
   if (!loan) return err('Not found', 404);
-  if (!loan.currentToken || !['sent', 'discuss'].includes(loan.status)) return err('There is no open request to resend.', 409);
-  const mail = borrowerEmail('reminder', loan.inputs.language, { name: loan.inputs.borrowerName, url: borrowerUrl(req, loan.currentToken), lo: loan.inputs.loName });
-  const e = await deliver({ type: 'borrower_reminder', to: loan.inputs.borrowerEmail, subject: mail.subject, html: mail.html, replyTo: approverRecipients()[0] });
-  await record(id, e, e.sent ? `Reminder emailed by ${s.name} (same link, nothing changed).` : `Reminder not sent: ${e.error}`);
-  const t = await textBorrower(id, loan, 'reminder', borrowerUrl(req, loan.currentToken));
+  if (!loan.currentToken || !LINK_STATUSES.includes(loan.status)) return err('There is no active borrower link to resend. Send the request first.', 409);
+  const url = borrowerUrl(req, loan.currentToken);
+  const kind = ['sent', 'discuss'].includes(loan.status) ? 'reminder' : 'link';
+  const mail = borrowerEmail(kind, loan.inputs.language, { name: loan.inputs.borrowerName, url, lo: loan.inputs.loName });
+  const e = await deliver({ type: `borrower_${kind}`, to: loan.inputs.borrowerEmail, subject: mail.subject, html: mail.html, replyTo: approverRecipients()[0] });
+  await record(id, e, e.sent ? `Link re-sent by ${s.name} (same link, nothing changed).` : `Link email not sent: ${e.error}`);
+  const t = await textBorrower(id, loan, kind, url);
   return json({ ok: true, emailed: e.sent, emailError: e.error, texted: t?.sent ?? null, textError: t?.error || null });
 }
 
@@ -339,33 +358,88 @@ async function retryApproval(req, s, id) {
   return json({ ok: true });
 }
 
+function saveDraftSettings(loan, drafts) {
+  const store = loan.approval.draftEdits = loan.approval.draftEdits || {};
+  for (const [k, d] of Object.entries(drafts || {})) {
+    if (!DRAFT_KINDS.includes(k) || !d || typeof d !== 'object') continue;
+    const prev = store[k] || {};
+    const next = {
+      note: typeof d.note === 'string' ? d.note.trim().slice(0, 2000) : prev.note || '',
+      subject: typeof d.subject === 'string' ? d.subject.trim().slice(0, 200) : prev.subject || '',
+      to: typeof d.to === 'string' ? d.to.trim().slice(0, 300) : prev.to || ''
+    };
+    if (d.reset) { next.note = ''; next.subject = ''; }
+    if (next.note || next.subject || next.to) store[k] = next; else delete store[k];
+  }
+}
+
+// Saves condition edits (the page autosaves each change) and hand edits to request drafts.
+// Returns the fresh conditions and drafts so the page can update in place.
 async function saveConditions(req, s, id) {
   const b = await readBody(req);
   const updates = Array.isArray(b.updates) ? b.updates.slice(0, 200) : [];
+  const current = await getLoan(id);
+  if (!current) return err('Not found', 404);
+  const url = current.currentToken ? borrowerUrl(req, current.currentToken) : null;
+  // Hebrew loans: when the English wording or "why" changes and the Hebrew wasn't edited too, re-translate it.
+  const heFailed = new Set();
+  if (current.inputs?.language === 'he' && current.approval?.status === 'done' && (aiConfigured() || process.env.MOCK_AI)) {
+    const byId = new Map(current.approval.conditions.map((c) => [c.id, c]));
+    for (const u of updates) {
+      const c = byId.get(u.id); if (!c) continue;
+      for (const [en, he] of [['plain', 'plainHe'], ['why', 'whyHe']]) {
+        const changed = typeof u[en] === 'string' && u[en].trim() !== c[en];
+        const heTouched = typeof u[he] === 'string' && u[he].trim() !== (c[he] || '');
+        if (!changed || heTouched) continue;
+        if (!u[en].trim()) { u[he] = ''; u[`${he}Auto`] = true; continue; }
+        try { u[he] = (await polishText({ text: u[en].trim(), mode: 'hebrew', audience: 'borrower' })).text; u[`${he}Auto`] = true; } catch (e) { console.error('[translate]', e); heFailed.add(u.id); }
+      }
+    }
+  }
   const r = await updateLoan(id, (loan) => {
     if (loan.approval?.status !== 'done') return { error: 'No conditions to update yet.' };
     const byId = new Map(loan.approval.conditions.map((c) => [c.id, c]));
-    const statusChanges = [];
+    const statusChanges = [], edits = [];
     for (const u of updates) {
       const c = byId.get(u.id); if (!c) continue;
-      for (const [k, max] of [['plain', 800], ['why', 300], ['plainHe', 800], ['whyHe', 300]]) if (typeof u[k] === 'string' && u[k].trim() !== c[k]) { c[k] = u[k].trim().slice(0, max); c.edited = { ...(c.edited || {}), [k]: true }; }
-      if (PROVIDERS.includes(u.provider) && u.provider !== c.provider) { c.provider = u.provider; c.edited = { ...(c.edited || {}), provider: true }; }
-      if (RECEIVERS.includes(u.receiver) && u.receiver !== c.receiver) { c.receiver = u.receiver; c.edited = { ...(c.edited || {}), receiver: true }; }
-      if (TIMINGS.includes(u.timing) && u.timing !== c.timing) { c.timing = u.timing; c.edited = { ...(c.edited || {}), timing: true }; }
-      if (typeof u.borrowerVisible === 'boolean' && u.borrowerVisible !== c.borrowerVisible) { c.borrowerVisible = u.borrowerVisible; c.edited = { ...(c.edited || {}), borrowerVisible: true }; }
+      for (const [k, max] of [['plain', 800], ['why', 300], ['plainHe', 800], ['whyHe', 300]]) if (typeof u[k] === 'string' && u[k].trim() !== (c[k] || '')) {
+        c[k] = u[k].trim().slice(0, max);
+        if (!u[`${k}Auto`]) c.edited = { ...(c.edited || {}), [k]: true };
+        edits.push(`#${c.num}`);
+      }
+      if (heFailed.has(c.id)) c.heStale = true; else if (u.plainHeAuto || u.whyHeAuto || typeof u.plainHe === 'string') delete c.heStale;
+      for (const [k, list] of [['provider', PROVIDERS], ['receiver', RECEIVERS], ['timing', TIMINGS]]) if (list.includes(u[k]) && u[k] !== c[k]) { c[k] = u[k]; c.edited = { ...(c.edited || {}), [k]: true }; edits.push(`#${c.num}`); }
+      if (typeof u.borrowerVisible === 'boolean' && u.borrowerVisible !== c.borrowerVisible) { c.borrowerVisible = u.borrowerVisible; c.edited = { ...(c.edited || {}), borrowerVisible: true }; edits.push(`#${c.num}`); }
       if (STATUSES.includes(u.status) && u.status !== c.status) { statusChanges.push(`#${c.num} ${c.status} → ${u.status}`); c.status = u.status; c.statusAt = now(); c.statusBy = s.name; }
     }
-    if (b.drafts && typeof b.drafts === 'object') for (const [k, d] of Object.entries(b.drafts)) if (loan.approval.drafts?.[k] && d) loan.approval.drafts[k] = { subject: String(d.subject || '').slice(0, 200), body: String(d.body || '').slice(0, 8000), to: String(d.to || '').slice(0, 300) };
-    event(loan, s, 'conditions', statusChanges.length ? `Checklist updated: ${statusChanges.join(', ')}.` : 'Checklist edited.');
+    // Request settings: the team's note, subject and recipient per request. The item list is never stored.
+    if (b.drafts && typeof b.drafts === 'object') saveDraftSettings(loan, b.drafts);
+    if (statusChanges.length || edits.length) event(loan, s, 'conditions', [statusChanges.length ? `Checklist updated: ${statusChanges.join(', ')}.` : '', edits.length ? `Edited ${[...new Set(edits)].join(', ')}.` : ''].filter(Boolean).join(' '));
   });
   if (r.error) return err(r.error, 409);
-  return json({ ok: true });
+  return json({ ok: true, conditions: r.loan.approval.conditions, drafts: draftsView(r.loan, url), translateFailed: [...heFailed] });
 }
 
 async function sendMessage(req, s, id) {
   const b = await readBody(req);
-  const loan = await getLoan(id);
+  let loan = await getLoan(id);
   if (!loan) return err('Not found', 404);
+  const portal = loan.currentToken ? borrowerUrl(req, loan.currentToken) : null;
+  // Requests built from the checklist: save the note/subject/recipient sent with this click, then build
+  // the message from the conditions as they are right now, so what goes out is never out of date.
+  if (DRAFT_KINDS.includes(b.kind) && loan.approval?.status === 'done') {
+    const r = await updateLoan(id, (l) => { saveDraftSettings(l, { [b.kind]: { note: b.note, subject: b.subject, to: b.to } }); });
+    loan = r.loan;
+    const d = draftsView(loan, portal)[b.kind];
+    if (!d) return err('Nothing is open for this request anymore.', 409);
+    b.body = d.body; b.subject = d.subject;
+  }
+  const toBorrower = b.channel === 'sms' || /^borrower/.test(b.kind || '') || String(b.to || '').toLowerCase().includes(String(loan.inputs?.borrowerEmail || '~').toLowerCase());
+  // Every message to the borrower ends with the way back to their loan page.
+  if (toBorrower && portal && !String(b.body || '').includes(portal)) {
+    const he = loan.inputs?.language === 'he';
+    b.body = `${String(b.body || '').trim()}${b.channel === 'sms' ? ' ' : '\n\n'}${he ? 'עמוד ההלוואה שלך (תנאים, אישור ורשימת מסמכים מעודכנים)' : 'Your loan page (latest terms, approval and checklist)'}: ${portal}`;
+  }
   const body = String(b.body || '').trim();
   if (!body) return err('The message is empty.');
   if (b.channel === 'sms') {
@@ -392,12 +466,150 @@ async function notifyChecklist(req, s, id) {
   return json({ ok: true, emailed: e.sent, emailError: e.error });
 }
 
+// ---------------- Document uploads (per condition) ----------------
+// The borrower uploads from their page (or the team on their behalf). The item flips to "received", an AI
+// first-pass check runs in the background, and whoever receives that condition gets an email to review it.
+async function readUpload(req) {
+  const len = Number(req.headers.get('content-length') || 0);
+  if (len > MAX_UPLOAD) return { error: err('That file is larger than 5 MB. Try a photo of each page, or a smaller PDF.', 413) };
+  const bytes = Buffer.from(await req.arrayBuffer());
+  if (!bytes.length) return { error: err('The file is empty.') };
+  if (bytes.length > MAX_UPLOAD) return { error: err('That file is larger than 5 MB. Try a photo of each page, or a smaller PDF.', 413) };
+  const kind = sniff(bytes);
+  if (!kind) return { error: err('Please upload a PDF or a photo (JPG or PNG).', 415) };
+  return { bytes, kind };
+}
+
+async function startUploadCheck(req, id, uid, notify) {
+  const url = `${new URL(req.url).origin}/.netlify/functions/upload-check-background`;
+  try { await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, uid, notify, key: jobKey(`${id}:${uid}`, 'upload') }) }); } catch (e) { console.error('[upload check trigger]', e); }
+}
+
+async function storeUpload(req, id, cid, rawName, by, byRole) {
+  const f = await readUpload(req); if (f.error) return f;
+  const uid = newUploadId(), name = cleanName(rawName, f.kind.ext);
+  await files().set(uploadKey(id, uid), f.bytes, { metadata: { name, mime: f.kind.mime } });
+  const r = await updateLoan(id, (loan) => {
+    if (loan.status === 'closed') return { error: 'This loan is closed.' };
+    if (loan.approval?.status === 'processing') return { error: 'We’re updating your checklist right now. Please try again in a minute.' };
+    const c = loan.approval?.status === 'done' && (loan.approval.conditions || []).find((x) => x.id === cid);
+    if (!c || (byRole === 'borrower' && !c.borrowerVisible)) return { error: 'That item is no longer on the checklist.' };
+    if (c.status === 'cleared') return { error: 'This item is already cleared. Nothing more is needed.' };
+    if ((c.uploads || []).length >= MAX_PER_CONDITION || loan.approval.conditions.flatMap((x) => x.uploads || []).length >= MAX_PER_LOAN) return { error: 'Too many files on this item. Please email the rest to your loan team.' };
+    c.uploads = c.uploads || [];
+    c.uploads.push({ id: uid, name, mime: f.kind.mime, size: f.bytes.length, at: now(), by, byRole, ai: { state: 'pending' }, review: null });
+    if (['open', 'requested'].includes(c.status)) { c.status = 'received'; c.statusAt = now(); c.statusBy = by; }
+    event(loan, byRole === 'borrower' ? 'borrower' : by, 'upload', `${byRole === 'borrower' ? 'Borrower' : by} uploaded "${name}" for #${c.num}.`);
+  });
+  if (r.error) { try { await files().delete(uploadKey(id, uid)); } catch { /* ignore */ } return { error: err(r.error === 'not_found' ? 'Not found' : r.error, r.error === 'not_found' ? 404 : 409) }; }
+  await startUploadCheck(req, id, uid, byRole === 'borrower');
+  return { loan: r.loan, uid };
+}
+
+async function borrowerUpload(req) {
+  const u = new URL(req.url), t = u.searchParams.get('t');
+  const rec = await tokenLookup(t);
+  if (!rec || rec.superseded) return err('This link is no longer active.', 410);
+  const loan = await getLoan(rec.id);
+  if (!loan || loan.currentTokenHash !== hashToken(t)) return err('This link is no longer active.', 410);
+  if (loan.status !== 'locked') return err('Uploads open once your rate is locked.', 409);
+  const out = await storeUpload(req, rec.id, u.searchParams.get('cid'), u.searchParams.get('name'), loan.inputs?.borrowerName || 'Borrower', 'borrower');
+  return out.error || json(borrowerView(out.loan));
+}
+
+async function teamUpload(req, s, id) {
+  const out = await storeUpload(req, id, new URL(req.url).searchParams.get('cid'), new URL(req.url).searchParams.get('name'), s.name, 'team');
+  return out.error || json({ ok: true, uid: out.uid });
+}
+
+function findUpload(loan, uid) {
+  for (const c of loan?.approval?.conditions || []) { const u = (c.uploads || []).find((x) => x.id === uid); if (u) return { c, u }; }
+  return null;
+}
+
+async function uploadFile(id, uid) {
+  const loan = await getLoan(id); const f = findUpload(loan, uid);
+  if (!f) return err('Not found', 404);
+  if (f.u.deletedAt) return err('This file was deleted when the loan closed.', 410);
+  const data = await files().get(uploadKey(id, uid), { type: 'arrayBuffer' });
+  if (!data) return err('Not found', 404);
+  return new Response(data, { headers: { 'content-type': f.u.mime, 'content-disposition': `inline; filename="${f.u.name.replace(/[^\w.\- ]/g, '_')}"`, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } });
+}
+
+// Accept, or send back with a reason (the borrower gets the reason by email/text, with their link).
+async function reviewUpload(req, s, id, uid) {
+  const b = await readBody(req);
+  const decision = b.decision === 'accept' ? 'accepted' : b.decision === 'return' ? 'returned' : null;
+  if (!decision) return err('Choose accept or send back.');
+  const reason = String(b.reason || '').trim().slice(0, 600);
+  if (decision === 'returned' && !reason) return err('Say what the borrower needs to fix.');
+  const pre = await getLoan(id);
+  let reasonHe = '';
+  if (decision === 'returned' && pre?.inputs?.language === 'he' && (aiConfigured() || process.env.MOCK_AI)) { try { reasonHe = (await polishText({ text: reason, mode: 'hebrew', audience: 'borrower' })).text; } catch (e) { console.error('[translate]', e); } }
+  const r = await updateLoan(id, (loan) => {
+    const f = findUpload(loan, uid); if (!f) return { error: 'Not found' };
+    f.u.review = { decision, reason, reasonHe, by: s.name, at: now() };
+    if (decision === 'returned') {
+      const othersOk = f.c.uploads.some((x) => x.id !== uid && x.review?.decision !== 'returned');
+      if (!othersOk && f.c.status !== 'cleared') { f.c.status = 'requested'; f.c.statusAt = now(); f.c.statusBy = s.name; }
+    }
+    event(loan, s, 'upload_review', `${decision === 'accepted' ? 'Accepted' : 'Sent back'} "${f.u.name}" for #${f.c.num}${reason ? `: ${reason}` : ''}.`);
+  });
+  if (r.error) return err(r.error, 404);
+  let emailed = null, texted = null;
+  if (decision === 'returned' && b.notify !== false && r.loan.currentToken) {
+    const loan = r.loan, f = findUpload(loan, uid), he = loan.inputs?.language === 'he';
+    const url = borrowerUrl(req, loan.currentToken), first = esc(String(loan.inputs?.borrowerName || '').split(/\s+/)[0]);
+    const item = he ? (f.c.plainHe || f.c.plain) : f.c.plain, why = he ? (reasonHe || reason) : reason;
+    const html = he
+      ? `<div dir="rtl"><p>שלום ${first},</p><p>בדקנו את הקובץ שהעלית עבור: <b>${esc(item)}</b></p><p>${esc(why)}</p><p>אפשר להעלות קובץ מתוקן ישירות בעמוד ההלוואה שלך:</p></div>${button(url, 'העלאת קובץ מתוקן')}`
+      : `<p>Hi ${first},</p><p>We reviewed the file you uploaded for: <b>${esc(item)}</b></p><p>${esc(why)}</p><p>You can upload a corrected file right on your loan page:</p>${button(url, 'Upload a corrected file')}`;
+    const e = await deliver({ type: 'upload_returned', to: loan.inputs.borrowerEmail, subject: he ? 'צריך עוד משהו קטן לגבי מסמך ששלחת' : 'One quick fix on a document you sent', html, replyTo: approverRecipients()[0] });
+    await record(id, e, e.sent ? 'Borrower emailed about the document that was sent back.' : `Email not sent: ${e.error}`);
+    emailed = e.sent;
+    if (loan.inputs?.smsConsent && normalizePhone(loan.inputs?.borrowerPhone)) {
+      const t = await deliverSms({ type: 'upload_returned_sms', to: loan.inputs.borrowerPhone, body: he ? `שלום ${first}, צריך תיקון קטן במסמך ששלחת: ${why} אפשר להעלות קובץ חדש כאן: ${url} להסרה השב STOP.` : `Hi ${first}, one quick fix on a document you sent: ${why} Upload a new file here: ${url} Reply STOP to opt out.` });
+      await record(id, t, t.sent ? 'Borrower texted about the document that was sent back.' : `Text not sent: ${t.error}`);
+      texted = t.sent;
+    }
+  }
+  return json({ ok: true, emailed, texted });
+}
+
+async function recheckUpload(req, s, id, uid) {
+  const r = await updateLoan(id, (loan) => { const f = findUpload(loan, uid); if (!f || f.u.deletedAt) return { error: 'Not found' }; f.u.ai = { state: 'pending' }; });
+  if (r.error) return err(r.error, 404);
+  await startUploadCheck(req, id, uid, false);
+  return json({ ok: true });
+}
+
+// Closing: the loan is done, so the borrower's uploaded documents are deleted from the portal.
+async function closeLoan(req, s, id) {
+  if (!canApprove(s)) return err('Only the loan officer login can mark a loan closed.', 403);
+  const loan = await getLoan(id);
+  if (!loan) return err('Not found', 404);
+  if (loan.status !== 'locked') return err('Only a locked loan can be marked closed.', 409);
+  const n = await deleteLoanUploads(loan);
+  const r = await updateLoan(id, (l) => {
+    l.status = 'closed'; l.closedAt = now();
+    for (const u of [...(l.approval?.conditions || []).flatMap((c) => c.uploads || []), ...(l.approvalPrevious?.conditions || []).flatMap((c) => c.uploads || []), ...(l.orphanUploads || [])]) if (!u.deletedAt) u.deletedAt = now();
+    event(l, s, 'closed', `Loan marked closed. ${n} uploaded document${n === 1 ? '' : 's'} deleted from the portal.`);
+  });
+  if (r.error) return err(r.error, 409);
+  return json({ ok: true, deleted: n });
+}
+
 // ---------------- Borrower handlers ----------------
 async function borrowerGet(req, context) {
   const t = new URL(req.url).searchParams.get('t');
   const rec = await tokenLookup(t);
   if (!rec) return err('This link is not valid.', 404);
   if (rec.superseded) { const l = await getLoan(rec.id); return json({ superseded: true, lang: l?.inputs?.language === 'he' ? 'he' : 'en' }); }
+  if (new URL(req.url).searchParams.get('poll')) {
+    const loan = await getLoan(rec.id);
+    if (!loan || loan.currentTokenHash !== hashToken(t)) return err('This link is not valid.', 404);
+    return json(borrowerView(loan));
+  }
   const r = await updateLoan(rec.id, (loan) => {
     if (loan.currentTokenHash !== hashToken(t)) return { error: 'gone' };
     loan.views = (loan.views || []).slice(-50);
@@ -438,7 +650,7 @@ async function borrowerRespond(req, context) {
   if (r.error) return err(r.error, 409);
   const id = rec.id, loan = r.loan, name = loan.inputs.borrowerName;
   if (action === 'confirm') {
-    const e1 = await deliver({ type: 'borrower_copy', to: loan.inputs.borrowerEmail, subject: copySubject(loan.response.lang), html: confirmationCopy(loan), replyTo: approverRecipients()[0] });
+    const e1 = await deliver({ type: 'borrower_copy', to: loan.inputs.borrowerEmail, subject: copySubject(loan.response.lang), html: confirmationCopy(loan, borrowerUrl(req, loan.currentToken)), replyTo: approverRecipients()[0] });
     await record(id, e1, e1.sent ? 'Copy of the confirmed request emailed to the borrower.' : `Borrower copy not sent: ${e1.error}`);
     const e2 = await deliver({ type: 'team_confirmed', to: allInternal(), subject: `Confirmed: ${name} approved the loan request (v${loan.version})`, html: `<p><b>${esc(name)}</b> confirmed the loan request for ${esc(loan.worksheet.header.property)}. You can submit to underwriting.</p><p><a href="${loanUrl(req, id)}">Open in the portal</a></p>` });
     await record(id, e2);
@@ -449,7 +661,7 @@ async function borrowerRespond(req, context) {
   return json(borrowerView(loan));
 }
 
-function confirmationCopy(loan) {
+function confirmationCopy(loan, url) {
   const v = loan.versions.find((x) => x.v === loan.version), t = v.terms, res = loan.response, n = res.numbers;
   const he = res.lang === 'he';
   const rows = he ? [
@@ -464,8 +676,8 @@ function confirmationCopy(loan) {
   const when = new Date(res.at).toLocaleString('en-US', { timeZone: 'America/Los_Angeles', dateStyle: 'medium', timeStyle: 'short' }) + ' PT';
   const table = `<table style="width:100%;border-collapse:collapse;font-size:14px">${rows.map(([a, b]) => `<tr><td style="padding:8px 0;border-bottom:1px solid #EEF1F0;color:#3B4652">${esc(a)}</td><td style="padding:8px 0;border-bottom:1px solid #EEF1F0;text-align:${he ? 'left' : 'right'};font-weight:bold">${esc(b)}</td></tr>`).join('')}</table>`;
   return he
-    ? `<div dir="rtl"><p>תודה. זה עותק של בקשת ההלוואה שאישרת ב-${esc(when)} (גרסה ${loan.version}).</p>${table}<p style="font-size:13px;color:#55606B">אלה תנאים מוצעים. הם יכולים להשתנות אם המידע משתנה, כולל שווי השמאות, דירוג האשראי או מחירי השוק. הריבית אינה סופית עד שהיא ננעלת.</p></div>`
-    : `<p>Thank you. This is a copy of the loan request you confirmed on ${esc(when)} (version ${loan.version}).</p>${table}<p style="font-size:13px;color:#55606B">These are proposed terms. They can change if your information changes, including the appraised value, your credit, or market pricing. Your rate is not final until it is locked.</p>`;
+    ? `<div dir="rtl"><p>תודה. זה עותק של בקשת ההלוואה שאישרת ב-${esc(when)} (גרסה ${loan.version}).</p>${table}<p style="font-size:13px;color:#55606B">אלה תנאים מוצעים. הם יכולים להשתנות אם המידע משתנה, כולל שווי השמאות, דירוג האשראי או מחירי השוק. הריבית אינה סופית עד שהיא ננעלת.</p>${button(url, 'לעמוד ההלוואה שלך')}<p style="font-size:13px;color:#55606B">שמור את הקישור הזה: העמוד תמיד מציג את המצב העדכני של ההלוואה.</p></div>`
+    : `<p>Thank you. This is a copy of the loan request you confirmed on ${esc(when)} (version ${loan.version}).</p>${table}<p style="font-size:13px;color:#55606B">These are proposed terms. They can change if your information changes, including the appraised value, your credit, or market pricing. Your rate is not final until it is locked.</p>${button(url, 'Open my loan page')}<p style="font-size:13px;color:#55606B">Keep this link: your loan page always shows the latest status of your loan.</p>`;
 }
 
 async function borrowerAsk(req) {
@@ -499,6 +711,7 @@ export default async (req, context) => {
     if (path === 'b' && m === 'GET') return borrowerGet(req, context);
     if (path === 'b/respond' && m === 'POST') return borrowerRespond(req, context);
     if (path === 'b/ask' && m === 'POST') return borrowerAsk(req);
+    if (path === 'b/upload' && m === 'POST') return borrowerUpload(req);
 
     // Auth
     if (path === 'login' && m === 'POST') {
@@ -521,7 +734,11 @@ export default async (req, context) => {
       const text = String(b.text || '').trim();
       if (!text) return err('Nothing to polish yet.');
       if (!aiConfigured() && !process.env.MOCK_AI) return err('Add an AI key (OPENAI_API_KEY or ANTHROPIC_API_KEY) in Netlify to use this.', 503);
-      try { return json(await polishText({ text, mode: polishModes.includes(b.mode) ? b.mode : 'polish', audience: ['borrower', 'party', 'internal'].includes(b.audience) ? b.audience : 'borrower' })); }
+      const mode = polishModes.includes(b.mode) ? b.mode : 'polish';
+      if (mode === 'tone' && !toneKeys.includes(b.tone)) return err('Pick a tone.');
+      const instruction = String(b.instruction || '').trim();
+      if (mode === 'custom' && !instruction) return err('Tell the AI what to change.');
+      try { return json(await polishText({ text, mode, tone: b.tone, instruction, audience: ['borrower', 'party', 'internal'].includes(b.audience) ? b.audience : 'borrower' })); }
       catch (e) { console.error('[polish]', e); return err(`The AI could not rewrite this. ${e.message === 'not_configured' ? 'No AI key is set.' : e.message}`, 502); }
     }
     // Document formats (Settings) and background AI jobs
@@ -552,6 +769,14 @@ export default async (req, context) => {
 
     if (path === 'loans' && m === 'GET') return json({ loans: (await listLoans()).map(summary) });
     if (path === 'loans' && m === 'POST') return createLoan(req, s);
+    const um = path.match(/^loans\/([a-z0-9]+)\/uploads\/([a-z0-9]+)(?:\/(review|recheck))?$/);
+    if (um) {
+      const [, id, uid, act] = um;
+      if (!act && m === 'GET') return uploadFile(id, uid);
+      if (act === 'review' && m === 'POST') return reviewUpload(req, s, id, uid);
+      if (act === 'recheck' && m === 'POST') return recheckUpload(req, s, id, uid);
+      return err('Not found', 404);
+    }
     const lm = path.match(/^loans\/([a-z0-9]+)(?:\/([a-z-]+))?$/);
     if (lm) {
       const [, id, action] = lm;
@@ -583,6 +808,8 @@ export default async (req, context) => {
       if (action === 'conditions') return saveConditions(req, s, id);
       if (action === 'message') return sendMessage(req, s, id);
       if (action === 'notify-checklist') return notifyChecklist(req, s, id);
+      if (action === 'upload') return teamUpload(req, s, id);
+      if (action === 'close') return closeLoan(req, s, id);
     }
     return err('Not found', 404);
   } catch (e) {

@@ -17,8 +17,15 @@ for (let i = 0; i < 30 && (await call('GET', `/api/loans/${id}`, null, lo)).d.lo
 const pdf = fs.readFileSync('test/approval-sample.pdf');
 let L = (await call('GET', `/api/loans/${id}`, null, lo)).d.loan;
 const cond = L.approval.conditions.find((c) => c.borrowerVisible);
-ok((await raw(`/api/b/upload?t=${t}&cid=${cond.id}&name=x.pdf`, pdf, 'application/pdf')).s === 409, 'borrower cannot upload before the rate is locked');
+const b0 = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium' });
+const p0 = await (await b0.newContext({ viewport: { width: 390, height: 860 } })).newPage();
+await p0.goto(url); await p0.waitForSelector('h1');
+ok(await p0.locator('.upbtn').count() >= 1, 'confirmed stage (approval read, before UW result): borrower link already shows the checklist with Upload');
 await call('POST', `/api/loans/${id}/uw`, { result: 'approved', approvedLtv: 75, approvedRate: 7.625, notify: true }, lo);
+await p0.reload(); await p0.waitForSelector('.upbtn');
+ok((await p0.textContent('body')).includes('You can start sending the items below now'), 'approved stage: checklist with Upload, and "start sending the items" note');
+await p0.screenshot({ path: `${SHOTS}/borrower-approved.png`, fullPage: true });
+await b0.close();
 await call('POST', `/api/loans/${id}/lock`, { rate: 7.75, expires: '2026-11-15', payment: 1695.65, notify: true }, lo);
 ok((await raw(`/api/b/upload?t=${t}&cid=${cond.id}&name=notes.txt`, Buffer.from('hello there this is text'), 'text/plain')).s === 415, 'non-PDF/image file refused');
 ok((await raw(`/api/b/upload?t=bogus_token_that_is_long_enough_123&cid=${cond.id}&name=x.pdf`, pdf, 'application/pdf')).s === 410, 'bad link cannot upload');

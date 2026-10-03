@@ -53,6 +53,8 @@ function borrowerView(loan, { preview = false } = {}) {
     stage, status: loan.status, version: loan.version || 0, preview,
     lang: loan.inputs?.language === 'he' ? 'he' : 'en',
     terms, uw, lock,
+    // Before the lock, the borrower can already see (and upload for) the items from the approval.
+    checklist: !preview && ['confirmed', 'uw_approved'].includes(loan.status) && ['done', 'processing'].includes(loan.approval?.status) ? borrowerItems(loan).filter((x) => x.id) : null,
     response: preview ? null : (loan.response && loan.response.v === loan.version ? { action: loan.response.action, choices: loan.response.choices, at: loan.response.at, numbers: loan.response.numbers } : null),
     aiEnabled: aiConfigured()
   };
@@ -60,6 +62,7 @@ function borrowerView(loan, { preview = false } = {}) {
 
 // The borrower's checklist: their items from the approval (plain English + why, with what they've uploaded),
 // plus any extra lines the team added at lock.
+const UPLOAD_STATUSES = ['confirmed', 'uw_approved', 'locked'];
 function borrowerUploadView(u) {
   const ai = u.ai || {};
   return {
@@ -74,7 +77,7 @@ function borrowerItems(loan) {
   const fromApproval = conds ? (conds || []).filter((c) => c.borrowerVisible).map((c) => ({
     id: c.id, text: c.plain, why: c.why, textHe: c.plainHe || '', whyHe: c.whyHe || '', timing: c.timing,
     status: c.status, done: ['received', 'cleared'].includes(c.status), cleared: c.status === 'cleared',
-    canUpload: loan.status === 'locked' && loan.approval?.status === 'done' && c.status !== 'cleared',
+    canUpload: UPLOAD_STATUSES.includes(loan.status) && loan.approval?.status === 'done' && c.status !== 'cleared',
     uploads: (c.uploads || []).map(borrowerUploadView)
   })) : [];
   const extra = (loan.lock?.conditions || []).map((t) => ({ text: t, why: '', textHe: '', whyHe: '', timing: 'other', done: false, uploads: [] }));
@@ -512,7 +515,7 @@ async function borrowerUpload(req) {
   if (!rec || rec.superseded) return err('This link is no longer active.', 410);
   const loan = await getLoan(rec.id);
   if (!loan || loan.currentTokenHash !== hashToken(t)) return err('This link is no longer active.', 410);
-  if (loan.status !== 'locked') return err('Uploads open once your rate is locked.', 409);
+  if (!UPLOAD_STATUSES.includes(loan.status)) return err('Uploads aren’t open on this loan right now. Please contact your loan team.', 409);
   const out = await storeUpload(req, rec.id, u.searchParams.get('cid'), u.searchParams.get('name'), loan.inputs?.borrowerName || 'Borrower', 'borrower');
   return out.error || json(borrowerView(out.loan));
 }

@@ -78,7 +78,7 @@ const C = {
     apChecks: 'Approved as you confirmed', ltv: 'Loan-to-value', program: 'Program',
     yourRate: 'Your rate', rateToday: 'Your rate today', rateSame: 'Same as when we submitted.', rateMoved: (a) => `Was ${a} when we submitted. Market pricing moved; your loan structure did not change.`,
     payFollows: "We'll confirm your monthly payment with your lock.",
-    apNext1: "You'll get your lock confirmation, plus a short, plain-English list of the items underwriting needs before closing.", apNext2: 'Nothing for you to do right now.',
+    apNext1: "You'll get your lock confirmation, plus a short, plain-English list of the items underwriting needs before closing.", apNext2: 'Nothing for you to do right now.', apNext2Items: 'You can start sending the items below now. It helps us close faster.',
     apDisc: 'Your loan structure was approved as requested. The rate reflects market pricing at the time we lock. Your terms can still change if your information changes before closing.',
     questions: 'Questions? Schedule a call',
     rsEyebrow: 'Step 2 of 3 · Underwriting decision', rsH1: "Underwriting asked for a change. Let's talk before we lock.", rsLead: 'We pushed for the terms you confirmed. Underwriting approved your loan, but only with the change below. Nothing is locked yet.',
@@ -166,7 +166,7 @@ const C = {
     apChecks: 'אושר כפי שאישרת', ltv: 'יחס מימון', program: 'תוכנית',
     yourRate: 'הריבית שלך', rateToday: 'הריבית שלך היום', rateSame: 'כמו בזמן ההגשה.', rateMoved: (a) => `בזמן ההגשה הייתה ${a}. מחירי השוק זזו; מבנה ההלוואה לא השתנה.`,
     payFollows: 'נאשר את התשלום החודשי יחד עם הנעילה.',
-    apNext1: 'תקבל אישור נעילה ורשימה קצרה ופשוטה של מה שהחיתום צריך לפני הסגירה.', apNext2: 'אין צורך לעשות כלום כרגע.',
+    apNext1: 'תקבל אישור נעילה ורשימה קצרה ופשוטה של מה שהחיתום צריך לפני הסגירה.', apNext2: 'אין צורך לעשות כלום כרגע.', apNext2Items: 'אפשר כבר להתחיל לשלוח את הפריטים שלמטה. זה עוזר לנו לסגור מהר יותר.',
     apDisc: 'מבנה ההלוואה אושר כפי שביקשנו. הריבית משקפת את מחירי השוק בזמן הנעילה. התנאים עדיין יכולים להשתנות אם המידע משתנה לפני הסגירה.',
     questions: 'שאלות? קבעו שיחה',
     rsEyebrow: 'שלב 2 מתוך 3 · החלטת החיתום', rsH1: 'החיתום ביקש שינוי. בוא נדבר לפני הנעילה.', rsLead: 'נלחמנו על התנאים שאישרת. החיתום אישר את ההלוואה, אבל רק עם השינוי שלמטה. שום דבר עוד לא ננעל.',
@@ -291,6 +291,7 @@ function screenRequest() {
 
   return `${header()}
     <div class="hero"><div class="eyebrow">${esc(t.reqEyebrow(v.version))}</div><h1>${esc(t.reqH1)}</h1><p class="lead">${esc(t.reqIntro)}</p>${addr(tm)}</div>
+    ${done && v.checklist?.length ? checklistCard(v.checklist).html : ''}
     ${tm.noteToBorrower ? `<div class="m why"><div class="h">${esc(t.noteFrom(tm.lo.name))}</div><div class="b" dir="auto">${esc(tm.noteToBorrower)}</div></div>` : ''}
     <div class="m big"><div class="lbl">${esc(toYou ? t.cashToYou : t.cashToClose)}</div><div class="num">${$$(Math.round(sc.funds.amount), 0)}</div>
       <div class="lbl">${esc(purchase ? t.subPurchase(tm.deposit ? $$(tm.deposit, 0) : '', tm.paidBeforeClosing ? $$(tm.paidBeforeClosing, 0) : '') : t.subRefi)}</div>
@@ -330,7 +331,8 @@ function screenApproved() {
     <div class="m big"><div class="lbl">${esc(moved ? t.rateToday : t.yourRate)}</div><div class="num">${pct(uw.approvedRate || tm.rate)}</div>
       <div class="note">${esc(moved ? t.rateMoved(pct(uw.rateAtSubmission)) : t.rateSame)}</div>
       <div class="foot"><span>${esc(t.payment)}</span><strong>${moved || !pay ? esc(t.payFollows) : $$(pay, 0)}</strong></div></div>
-    <div class="steps"><div class="t">${esc(t.nextTitle)}</div><div class="step" style="display:block">${esc(t.apNext1)}</div><div class="step" style="display:block">${esc(t.apNext2)}</div></div>
+    <div class="steps"><div class="t">${esc(t.nextTitle)}</div><div class="step" style="display:block">${esc(t.apNext1)}</div><div class="step" style="display:block">${esc(v.checklist?.length ? t.apNext2Items : t.apNext2)}</div></div>
+    ${v.checklist?.length ? checklistCard(v.checklist).html : ''}
     <div class="disc">${esc(t.apDisc)}</div>
     <div class="actions">${calLink(t.questions)}</div>`;
 }
@@ -352,16 +354,15 @@ function screenRestructure() {
     <div class="actions">${calLink(t.book, 'primary')}</div>`;
 }
 
-function screenLocked() {
-  const v = S.view, tm = v.terms, lk = v.lock || {}, t = T();
-  const he = S.lang === 'he';
-  const items = (lk.items && lk.items.length ? lk.items : (lk.conditions || []).map((c) => ({ text: c, why: '', done: false }))).map((x) => {
+// The borrower's checklist with uploads. Shown from the time the approval is in (approved / locked).
+function checklistCard(rawItems) {
+  const t = T(), he = S.lang === 'he';
+  const items = (rawItems || []).map((x) => {
     const latest = (x.uploads || []).filter((u) => !u.deleted).at(-1);
     const attention = !x.cleared && latest && (latest.review?.decision === 'returned' || (!latest.review && latest.ai?.state === 'done' && latest.ai.verdict === 'needs_attention'));
     return { ...x, text: he && x.textHe ? x.textHe : x.text, why: he && x.whyHe ? x.whyHe : x.why, attention, done: x.done && !attention };
   });
   const open = items.filter((x) => !x.done), done = items.filter((x) => x.done);
-  const st = t.stages.map((l, i) => [l, i < 3 ? 'b-done' : i === 3 && open.length ? 'b-now' : i === 3 ? 'b-done' : '']);
   const upLine = (u) => {
     let cls = 'neutral', msg = '';
     if (u.review?.decision === 'accepted') { cls = 'good'; msg = t.upAccepted; }
@@ -381,14 +382,22 @@ function screenLocked() {
       ${S.upErr[x.id] ? `<div class="up up-warn"><div class="up-msg">${esc(S.upErr[x.id])}</div></div>` : ''}`;
   };
   const itemHtml = (x) => `<div class="item ${x.done ? 'item-done' : ''}"><span class="box">${x.done ? ICON_OK(14) : ''}</span><span style="flex:1;min-width:0"><div class="it" style="font-weight:500" dir="auto">${esc(x.text)}</div>${x.why ? `<div class="id" dir="auto"><strong>${esc(t.whyLbl)}:</strong> ${esc(x.why)}</div>` : ''}${!x.done && t.timing[x.timing] ? `<div class="id">${esc(t.timing[x.timing])}</div>` : ''}${x.done && !(x.uploads || []).length ? `<div class="id">${esc(t.received)}</div>` : ''}${upControls(x)}</span></div>`;
+  const html = `<div class="m card" style="padding-bottom:14px"><div style="display:flex;justify-content:space-between;align-items:baseline;padding:12px 0 4px;gap:12px"><div style="font-size:16px;font-weight:700">${esc(t.need)}</div><div class="small" style="padding:0">${items.length ? esc(t.progress(done.length, items.length)) : ''}</div></div>
+      ${items.length ? open.map(itemHtml).join('') + done.map(itemHtml).join('') : `<div class="small">${esc(t.noItems)}</div>`}
+      <div class="small" style="padding:8px 0 0">${esc(t.sendDocs)}</div>${items.some((x) => x.canUpload) ? `<div class="small" style="padding:6px 0 0">${esc(t.upHelp)}</div>` : ''}</div>`;
+  return { html, open };
+}
+
+function screenLocked() {
+  const v = S.view, tm = v.terms, lk = v.lock || {}, t = T();
+  const card = checklistCard(lk.items && lk.items.length ? lk.items : (lk.conditions || []).map((c) => ({ text: c, why: '', done: false })));
+  const st = t.stages.map((l, i) => [l, i < 3 ? 'b-done' : i === 3 && card.open.length ? 'b-now' : i === 3 ? 'b-done' : '']);
   return `${header()}
     <div class="hero"><div class="eyebrow">${esc(t.lkEyebrow)}</div><h1>${esc(t.lkH1)}</h1>${addr(tm)}</div>
     <div class="m big"><div class="lbl">${esc(t.lockedRate)}</div><div class="num">${pct(lk.rate)}</div><div class="note">${esc(t.lockedUntil(fmtDate(lk.expires)))}</div>
       <div class="foot"><span>${esc(t.payment)}</span><strong>${$$(lk.payment, 0)}</strong></div></div>
     <div class="m bars">${st.map(([l, c]) => `<div><div class="bar ${c}"></div>${esc(l)}</div>`).join('')}</div>
-    <div class="m card" style="padding-bottom:14px"><div style="display:flex;justify-content:space-between;align-items:baseline;padding:12px 0 4px;gap:12px"><div style="font-size:16px;font-weight:700">${esc(t.need)}</div><div class="small" style="padding:0">${items.length ? esc(t.progress(done.length, items.length)) : ''}</div></div>
-      ${items.length ? open.map(itemHtml).join('') + done.map(itemHtml).join('') : `<div class="small">${esc(t.noItems)}</div>`}
-      <div class="small" style="padding:8px 0 0">${esc(t.sendDocs)}</div>${items.some((x) => x.canUpload) ? `<div class="small" style="padding:6px 0 0">${esc(t.upHelp)}</div>` : ''}</div>
+    ${card.html}
     <div class="disc">${esc(t.lkDisc)}</div>
     <div class="actions">${calLink(t.questions)}</div>`;
 }
@@ -490,7 +499,7 @@ async function uploadFiles(cid, list) {
 }
 // While an AI check is running, refresh quietly every few seconds (up to ~3 minutes).
 let pollTimer = null;
-function pending() { return (S.view?.lock?.items || []).some((x) => (x.uploads || []).some((u) => u.ai?.state === 'pending')); }
+function pending() { return [...(S.view?.lock?.items || []), ...(S.view?.checklist || [])].some((x) => (x.uploads || []).some((u) => u.ai?.state === 'pending')); }
 function poll(n) {
   clearTimeout(pollTimer);
   if (!pending() || n > 45 || !token) return;

@@ -1,7 +1,25 @@
-// AI assistant: Claude if ANTHROPIC_API_KEY is set, otherwise ChatGPT if OPENAI_API_KEY is set.
+// AI assistant: Claude or ChatGPT (see pickProvider for which one is used).
 import { scenario } from '../../../public/js/calc.mjs';
 
-export function aiConfigured() { return Boolean(process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY); }
+export function aiConfigured() { return Boolean(pickProvider()); }
+
+// Which AI to use. Netlify's AI Gateway silently injects ANTHROPIC_API_KEY / OPENAI_API_KEY plus
+// *_BASE_URL into every project (billed as Netlify credits); those keys only work through the base URL.
+// Order: AI_PROVIDER override → your own key (no base URL set) → Netlify gateway. Claude first within each.
+export function pickProvider() {
+  const e = process.env;
+  const has = { claude: Boolean(e.ANTHROPIC_API_KEY), chatgpt: Boolean(e.OPENAI_API_KEY) };
+  const forced = { claude: 'claude', anthropic: 'claude', openai: 'chatgpt', chatgpt: 'chatgpt' }[String(e.AI_PROVIDER || '').toLowerCase()];
+  if (forced && has[forced]) return forced;
+  const own = { claude: has.claude && !e.ANTHROPIC_BASE_URL, chatgpt: has.chatgpt && !e.OPENAI_BASE_URL };
+  if (own.claude) return 'claude';
+  if (own.chatgpt) return 'chatgpt';
+  if (has.claude) return 'claude';
+  if (has.chatgpt) return 'chatgpt';
+  return null;
+}
+const anthropicUrl = () => `${(process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com').replace(/\/+$/, '').replace(/\/v1$/, '')}/v1/messages`;
+const openaiUrl = () => `${(process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/+$/, '')}/responses`;
 
 export function systemPrompt(view, choices, lang) {
   const t = view.terms;
@@ -51,7 +69,8 @@ export function friendlyAIError(provider, status, raw) {
   const msg = String(raw || '');
   const name = provider === 'claude' ? 'Anthropic (Claude)' : 'OpenAI';
   const site = provider === 'claude' ? 'console.anthropic.com' : 'platform.openai.com';
-  if (status === 401 || /invalid.*(api|x-api)?.?key|incorrect api key/i.test(msg)) return `${name} rejected the API key. Re-copy the key from ${site} into Netlify (no spaces), then redeploy.`;
+  const viaNetlify = provider === 'claude' ? Boolean(process.env.ANTHROPIC_BASE_URL) : Boolean(process.env.OPENAI_BASE_URL);
+  if (status === 401 || /invalid.*(api|x-api)?.?key|incorrect api key/i.test(msg)) return viaNetlify ? `${name} via Netlify AI Gateway rejected the request. Check that AI features are on for your Netlify team and the site has a production deploy, or add your own key from ${site}.` : `${name} rejected the API key. Re-copy the key from ${site} into Netlify (no spaces), then redeploy.`;
   if (/quota|billing|credit balance|insufficient/i.test(msg)) return `${name} account has no credit. Add a payment method or credit at ${site} (Billing), then try again.`;
   if (status === 404 || /model.*(not exist|not found|does not have access)|do not have access to the model/i.test(msg)) return `${name} says this account can't use the model. ${msg}`.slice(0, 300);
   if (status === 403 && /verif/i.test(msg)) return `${name} needs your organization verified to use this model (${site} → Settings → Organization). ${msg}`.slice(0, 300);
@@ -84,7 +103,7 @@ function openaiText(d) {
 }
 
 async function callClaude({ system, messages, maxTokens, timeoutMs }) {
-  const d = await post('claude', 'https://api.anthropic.com/v1/messages',
+  const d = await post('claude', anthropicUrl(),
     { 'x-api-key': process.env.ANTHROPIC_API_KEY.trim(), 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
     { model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-5-5', max_tokens: maxTokens, system, messages }, timeoutMs);
   return (d.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
@@ -95,7 +114,7 @@ async function callOpenAI({ system, messages, maxTokens, json, effort, timeoutMs
   const body = { model, instructions: system, input: messages, store: false, max_output_tokens: maxTokens };
   if (isReasoningModel(model)) body.reasoning = { effort };
   if (json) body.text = { format: { type: 'json_object' } };
-  const d = await post('chatgpt', 'https://api.openai.com/v1/responses',
+  const d = await post('chatgpt', openaiUrl(),
     { authorization: `Bearer ${process.env.OPENAI_API_KEY.trim()}`, 'content-type': 'application/json' }, body, timeoutMs);
   const text = openaiText(d);
   if (!text && d.status === 'incomplete') throw new Error('The AI ran out of room before answering. Try a shorter text.');
@@ -104,11 +123,12 @@ async function callOpenAI({ system, messages, maxTokens, json, effort, timeoutMs
 
 // Quick calls run inside the normal web request (Netlify allows ~25s), so they get a 22s budget.
 export async function askAI(system, messages, maxTokens = 500) {
-  if (process.env.ANTHROPIC_API_KEY) {
+  const p = pickProvider();
+  if (p === 'claude') {
     const text = await callClaude({ system, messages, maxTokens, timeoutMs: 22000 });
     return { answer: text.trim(), provider: 'claude' };
   }
-  if (process.env.OPENAI_API_KEY) {
+  if (p === 'chatgpt') {
     // Reasoning tokens count toward max_output_tokens, so leave headroom.
     const text = await callOpenAI({ system, messages, maxTokens: maxTokens + 2000, effort: 'minimal', timeoutMs: 22000 });
     return { answer: text.trim(), provider: 'chatgpt' };
@@ -127,8 +147,9 @@ export function extractJson(text) {
 export async function callAIJson(system, user, maxTokens = 12000) {
   // Used from background functions (15-minute limit), so a long budget is fine.
   const messages = [{ role: 'user', content: user }];
-  if (process.env.ANTHROPIC_API_KEY) return { data: extractJson(await callClaude({ system, messages, maxTokens, timeoutMs: 600000 })), provider: 'claude' };
-  if (process.env.OPENAI_API_KEY) return { data: extractJson(await callOpenAI({ system, messages, maxTokens: maxTokens + 8000, json: true, effort: 'low', timeoutMs: 600000 })), provider: 'chatgpt' };
+  const p = pickProvider();
+  if (p === 'claude') return { data: extractJson(await callClaude({ system, messages, maxTokens, timeoutMs: 600000 })), provider: 'claude' };
+  if (p === 'chatgpt') return { data: extractJson(await callOpenAI({ system, messages, maxTokens: maxTokens + 8000, json: true, effort: 'low', timeoutMs: 600000 })), provider: 'chatgpt' };
   throw new Error('No AI key is set (OPENAI_API_KEY or ANTHROPIC_API_KEY).');
 }
 
